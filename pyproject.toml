@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "TROLOLO"
+version = "0.5.0"
+dependencies = [
+    "torch",
+    # core deps only
+]
+
+[project.optional-dependencies]
+examples = [
+    "datasets",
+    # whatever your examples need beyond core
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
