@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import time
 
 import torch
 import torch.nn as nn
@@ -163,13 +164,10 @@ class TROLOLO(nn.Module):
             self.head_input_size = embed_dim
         if representation_size is None:
             heads_layers["head"] = nn.Linear(self.head_input_size, num_classes)
-            #heads_layers["head"] = nn.Linear(embed_dim*seq_length, num_classes)
-            #self.heads = nn.Linear(self.head_input_size, num_classes)
         else:
             heads_layers["pre_logits"] = nn.Linear(self.head_input_size, representation_size)
             heads_layers["act"] = nn.Tanh()
             heads_layers["head"] = nn.Linear(representation_size, num_classes)
-        #self.head_pool = nn.AdaptiveAvgPool1d(self.head_input_size) if self.head_input_size > self.embed_dim else nn.Identity()
         self.head_pool = nn.AdaptiveAvgPool1d(self.head_input_size//self.embed_dim)
         self.heads = nn.Sequential(heads_layers)
 
@@ -223,11 +221,15 @@ class TROLOLO(nn.Module):
             self._process_input=self._process_input_cnn
         self.forward=torch.compile(self.forward,fullgraph=True,options=coptions, disable=COMPILE_DISABLED["state"])
 
+    def init_heads(self,scale=1.0):
+        for hl in self.heads:
+            if hasattr(hl, "weight"):
+                torch.nn.init.kaiming_uniform_(hl.weight,mode="fan_out", a=math.sqrt(5))
+                hl.weight=nn.Parameter(hl.weight * scale)
+
     def _process_input_cnn(self, x: torch.Tensor) -> torch.Tensor:
         n, c, h, w = x.shape
         p = self.patch_size
-        #torch._assert(h == self.image_size, f"Wrong image height! Expected {self.image_size} but got {h}!")
-        #torch._assert(w == self.image_size, f"Wrong image width! Expected {self.image_size} but got {w}!")
         n_h = h // p
         n_w = w // p
         # (n, c, h, w) -> (n, embed_dim, n_h, n_w)
@@ -359,7 +361,12 @@ class TROLOLO(nn.Module):
                 progressBar.update(curr_bs)
                 lr_sched.step()
             progressBar.close()
-        self.heads = oldHead
+        self.eval()
+        with torch.no_grad():
+            self.heads = oldHead
+            self.init_heads()
+        optimizer.zero_grad()
+
 
     def validation_loop(self, dataloader, epoch, batch_size):
         self.eval()
@@ -367,14 +374,11 @@ class TROLOLO(nn.Module):
         acc_event = torch.cuda.Event()
         onehot_stream = torch.cuda.Stream(priority=1)
         onehot_event = torch.cuda.Event()
-        #if isinstance(dataloader, torch.utils.data.dataloader.DataLoader):
         datalength=None
         try:
             datalength = len(dataloader.dataset)
         except:
             datalength = dataloader.len
-        #else:
-        #    datalength = dataloader.len
         loss_fn = self.loss_fn
         accuracies = []
         accuracies5 = []
@@ -399,14 +403,10 @@ class TROLOLO(nn.Module):
             if accuracy > self.best_acc:
                 self.best_acc = accuracy.item()
                 torch.save(self.state_dict(),"trololo.weight")
-            #progressBar.last_print_t = progressBar.last_print_t - progressBar.mininterval
-            #progressBar.last_print_n = progressBar.last_print_n - progressBar.miniters
             if self.num_classes > 50:
                 force_pbar_setpostfix(progressBar,loss=loss, acc=f"{accuracy.item():.5f}", acc5=f"{accuracy5.item():.5f}", best=f"{self.best_acc:.5f}")
-                #progressBar.set_postfix(loss=loss, acc=f"{accuracy.item():.5f}", acc5=f"{accuracy5.item():.5f}", best=f"{self.best_acc:.5f}")
             else:
                 force_pbar_setpostfix(progressBar,loss=loss, acc=f"{accuracy.item():.5f}", best=f"{self.best_acc:.5f}")
-                #progressBar.set_postfix(loss=loss, acc=f"{accuracy.item():.5f}", best=f"{self.best_acc:.5f}")
             progressBar.close()
         return accuracy,accuracy5
 
@@ -426,11 +426,13 @@ class TROLOLO(nn.Module):
         return loss,accuracy,acc5
 
     def transfer_loop(self,lr,epochs,train_dataloader,batch_size):
+        self.train()
         acc_stream = torch.cuda.Stream(priority=1)
         onehot_stream = torch.cuda.Stream(priority=1)
         scaler = torch.amp.GradScaler()
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
         loss_fn = nn.CrossEntropyLoss()
+        loss_fn_nosmooth = nn.CrossEntropyLoss(reduction="none") # not really needed in this loop but required to reuse the batch training method
         x_gpu = self.preallocate_inputs(batch_size)
         y_gpu = self.preallocate_class_indices(batch_size)
         y_gpu_onehot = self.preallocate_targets(batch_size)
@@ -443,8 +445,8 @@ class TROLOLO(nn.Module):
             param.requires_grad = False
             nograd += 1
         transferring = True
+        self.heads.requires_grad_()
         for epoch in range(epochs):
-            self.train()
             if not transferring:
                 break
             progressBar = tqdm(total=len(train_dataloader.dataset), desc=f"Transfer epoch {epoch}/{epochs}: ", unit="images", colour="green", position=0, leave=True)
@@ -457,50 +459,33 @@ class TROLOLO(nn.Module):
                             transferring = True
                             nograd = nograd - 1
                             break
-                        self.heads.requires_grad_()
                     stuck = 0
                     if not transferring:
                         break
                 X_batch = data[0]
                 y_batch = data[1]
-                with (torch.compiler.set_stance("force_eager"), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16)):
-                    curr_bs = y_batch.shape[0]
-                    y = y_gpu[:curr_bs].copy_(y_batch, non_blocking=False)
-                    with torch.cuda.stream(onehot_stream):
-                        onehot_stream.wait_stream(torch.cuda.default_stream())
-                        y_onehot = y_gpu_onehot[:curr_bs, :].copy_(torch.nn.functional.one_hot(y, self.num_classes).float(), non_blocking=False)
-                    x = x_gpu[:curr_bs, :, :, :].copy_(X_batch, non_blocking=True)
-                    y_pred = self(x)
-                    with torch.cuda.stream(acc_stream):
-                        acc_stream.wait_stream(torch.cuda.default_stream())
-                        accuracy = (y_pred.detach().argmax(1) == y).float().mean()
-                        _, top5_preds = torch.topk(y_pred.detach(), k=5, dim=1)
-                        acc5 = (top5_preds == y.unsqueeze(1)).any(dim=1).float().mean().item()
-                    loss = loss_fn(y_pred, y_onehot)
-                optimizer.zero_grad()
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+                with torch.compiler.set_stance("force_eager"):
+                    x, y, y_onehot = self.copy_batch_to_preallocated(y_batch=y_batch, y_gpu=y_gpu, onehot_stream=onehot_stream, y_gpu_onehot=y_gpu_onehot, x_gpu=x_gpu, X_batch=X_batch)
+                    loss,_,_,accuracy,acc5 = self.train_batch(
+                        x=x, y=y, y_onehot=y_onehot, acc_stream=acc_stream, loss_fn=loss_fn, loss_fn_nosmooth=loss_fn_nosmooth, optimizer=optimizer, scaler=scaler)
                 loss = loss.item()
+                accuracy = accuracy.item()
                 i += 1
                 loss_sum = loss + loss_sum
                 loss_avg = loss_sum / i
                 if (best_loss - loss_avg) / (best_loss + 0.0000001) > 0.003*math.sqrt(epoch/epochs)  * len(list(self.parameters())) / (nograd + 1):
                     best_loss = loss_avg
                     stuck = 0
-                #elif epoch < epochs * 0.01: # First 1% of the epochs we just tune the head.
-                #    stuck = 0
                 else:
                     stuck += batch_size
                 if self.num_classes > 50:
-                    progressBar.set_postfix(loss=loss, loss_avg=loss_avg, stuck=stuck, acc=accuracy.item(), acc5=acc5, nograd=nograd)
+                    progressBar.set_postfix(loss=loss, loss_avg=loss_avg, stuck=stuck, acc=accuracy, acc5=acc5, nograd=nograd)
                 else:
-                    progressBar.set_postfix(loss=loss, loss_avg=loss_avg, stuck=stuck, acc=accuracy.item(), nograd=nograd)
+                    progressBar.set_postfix(loss=loss, loss_avg=loss_avg, stuck=stuck, acc=accuracy, nograd=nograd)
                 progressBar.update(len(y_batch))
             progressBar.close()
         for param in self.parameters():
             param.requires_grad = True
-
 
     def training_loop(self,train_data,val_data,lr,lr_mid,lr_min,n_epochs,batch_size,transfer=0):
         self.cuda()
@@ -536,6 +521,8 @@ class TROLOLO(nn.Module):
         else:
             val_dataloader=val_data
         n_batches =  datalength // batch_size
+        if transfer:
+            self.transfer_loop(lr=lr_mid/20.0,epochs=transfer,train_dataloader=train_dataloader,batch_size=batch_size)
         scaler = torch.amp.GradScaler()
         optimizer = torch.optim.AdamW(self.parameters(), lr=lr,weight_decay=1e-4)
         lr_sched = TROLOLOLR_Scheduler.semiauto(optimizer=optimizer,
@@ -549,8 +536,6 @@ class TROLOLO(nn.Module):
         x_gpu = self.preallocate_inputs(batch_size)
         y_gpu = self.preallocate_class_indices(batch_size)
         y_gpu_onehot = self.preallocate_targets(batch_size)
-        if transfer:
-            self.transfer_loop(lr=lr_mid/20,epochs=transfer,train_dataloader=train_dataloader,batch_size=batch_size)
         for epoch in range(n_epochs):
             loss_sum=0
             acc_sum=0
@@ -617,14 +602,14 @@ class TROLOLO(nn.Module):
         acc5=0
         with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
             y_pred = self(x)
-            with torch.cuda.stream(acc_stream):
-                acc_stream.wait_stream(self.default_stream)
-                accuracy = (y_pred.detach().argmax(1) == y).float().mean()
-                _, top5_preds = torch.topk(y_pred.detach(), k=5, dim=1)
-                acc5 = (top5_preds == y.unsqueeze(1)).any(dim=1).float().mean()
-            #    acc_event.record()
-            # onehot_event.wait() # Yolo! the one hot calculations should take no time compared to a forward pass
             with torch.inference_mode():
+                with torch.cuda.stream(acc_stream):
+                    acc_stream.wait_stream(self.default_stream)
+                    accuracy = (y_pred.detach().argmax(1) == y).float().mean()
+                    _, top5_preds = torch.topk(y_pred.detach(), k=5, dim=1)
+                    acc5 = (top5_preds == y.unsqueeze(1)).any(dim=1).float().mean()
+                #    acc_event.record()
+                # onehot_event.wait() # Yolo! the one hot calculations should take no time compared to a forward pass
                 unsmooth_loss_batch = loss_fn_nosmooth(y_pred, y_onehot).detach()
                 unsmooth_loss = unsmooth_loss_batch.mean()
             loss = loss_fn(y_pred, y_onehot)
@@ -675,9 +660,7 @@ class TROLOLO(nn.Module):
             if loss_avg < self.best_acc:
                 self.best_acc = loss_avg
                 torch.save(self.state_dict(),"trololo.weight")
-            progressBar.last_print_t = progressBar.last_print_t - progressBar.mininterval
-            progressBar.last_print_n = progressBar.last_print_n - progressBar.miniters
-            progressBar.set_postfix(loss=loss_avg, best=self.best_acc)
+            force_pbar_setpostfix(progressBar,loss=loss_avg, best=self.best_acc)
             progressBar.close()
         return loss_avg
 
@@ -936,485 +919,3 @@ def force_pbar_setpostfix(progressBar,**kwargs):
     progressBar.last_print_n = progressBar.last_print_n - progressBar.miniters
     progressBar.set_postfix(**kwargs)
 
-def TROLOLO_Hahahahaha(quantize=True):
-    from torchvision.transforms import v2, InterpolationMode
-    disable_compilation(False)
-    trololo = TROLOLO(image_size=64,
-                      img_channels=3,
-                      patch_size=4,
-                      kernel_size=8,
-                      group_conv=True,
-                      num_layers=6,
-                      num_heads=49,
-                      embed_dim=194,
-                      attention_dim="ceilheads",
-                      mlp_dim=194,
-                      n_class_tokens=2,
-                      num_classes=10,
-                      mlp_rank=0.05,
-                      qkv_rank=0.06,
-                      attnproj_rank=0.05,
-                      sequence_pyramid=[(2, 4)],
-                      attn_rank_pyramid=[(0, 32),(1, 32), (2, 32)],
-                      rank_pyramid_begin=2,
-                      rank_pyramid_factor=0.81,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
-                      attention_dropout=0.01,
-                      quantize_bits= None if not quantize else 8,
-                      activation=nn.Hardswish
-                      )
-    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
-    dataset = torchvision.datasets.ImageFolder("/home/pickman/Escritorio/TROLOLO/data/eurosat", transform=transform)
-    generator = torch.Generator().manual_seed(42)  # To always produce the same split.
-    _, val_data = random_split(dataset=dataset, lengths = [0.9, 0.1], generator=generator)
-    generator = torch.Generator().manual_seed(42)  # To always produce the same split.
-    transform = torchvision.transforms.Compose(
-        [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
-         v2.RandomVerticalFlip(),
-         v2.RandomHorizontalFlip(),
-         v2.RandomChoice([
-             v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-             v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
-         ]),
-         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
-         v2.RandomChoice([
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=0, translate=(0.02, 0.02), interpolation=InterpolationMode.NEAREST),
-             ]), p=0.75),
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=5, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
-             ]), p=0.25),
-             v2.ElasticTransform(alpha=150, sigma=6, fill=127),
-         ]),
-         v2.AugMix(severity=2),
-         v2.RandomErasing(p=0.8, scale=(0.0, 0.05), value='random'),
-         v2.RandomErasing(p=0.5, scale=(0.0, 0.05), value='random'),
-         v2.ToDtype(torch.float16, scale=True),
-         torchvision.transforms.v2.GaussianNoise(sigma=0.002),
-         ],
-    )
-    transform.__call__ = torch.compile(transform.__call__)
-    dataset = torchvision.datasets.ImageFolder("/home/pickman/Escritorio/TROLOLO/data/eurosat", transform=transform)
-    train_data, _ = random_split(dataset=dataset, lengths=[0.9, 0.1], generator=generator)
-    batch_size=64
-    infinitesat = torchvision.datasets.ImageFolder("/home/pickman/Escritorio/TROLOLO/data/infinitesat/images", transform=transform)
-    #trololo.pretraining_loop(train_data=infinitesat, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=2, batch_size=batch_size)
-    #trololo.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=300, batch_size=batch_size)
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=2000,batch_size=batch_size,transfer=0) # transfer 500
-    print("best acc: ",trololo.best_acc)
-
-
-def MNIST(quantize=True):
-    from torchvision.transforms import v2, InterpolationMode
-    disable_compilation(False)
-    trololo = TROLOLO(image_size=28,
-                      img_channels=1,
-                      patch_size=2,
-                      kernel_size=8,
-                      group_conv=False,
-                      num_layers=6,
-                      num_heads=16,
-                      embed_dim=192,
-                      attention_dim="ceilheads",
-                      mlp_dim=192,
-                      n_class_tokens=2,
-                      num_classes=10,
-                      mlp_rank=0.05,
-                      qkv_rank=0.06,
-                      attnproj_rank=0.05,
-                      sequence_pyramid=[(2, 4)],
-                      attn_rank_pyramid=[(0, 32),(1, 32), (2, 32)],
-                      rank_pyramid_begin=2,
-                      rank_pyramid_factor=0.81,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
-                      attention_dropout=0.01,
-                      quantize_bits= None if not quantize else 8,
-                      activation=nn.Hardswish
-                      )
-    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
-    val_data = torchvision.datasets.MNIST(root="data/MNIST", download=True, train=False, transform=transform)
-    transform = torchvision.transforms.Compose(
-        [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
-         v2.RandomChoice([
-             v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-             v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
-         ]),
-         v2.ColorJitter(brightness=0.12, contrast=0.18),
-         v2.RandomChoice([
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=0, translate=(0.02, 0.02), interpolation=InterpolationMode.NEAREST),
-             ]), p=0.75),
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=5, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
-             ]), p=0.25),
-             v2.ElasticTransform(alpha=150, sigma=6, fill=127),
-         ]),
-         v2.AugMix(severity=3),
-         v2.RandomErasing(p=0.8, scale=(0.0, 0.03), value='random'),
-         v2.RandomErasing(p=0.5, scale=(0.0, 0.03), value='random'),
-         v2.ToDtype(torch.float16, scale=True),
-         torchvision.transforms.v2.GaussianNoise(sigma=0.002),
-         ],
-    )
-    train_data = torchvision.datasets.MNIST(root="data/MNIST", download=True, train=True, transform=transform)
-    batch_size=64
-    #trololo.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=200, batch_size=batch_size)
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=300,batch_size=batch_size,transfer=0)
-    print("best acc: ",trololo.best_acc)
-
-
-def CIFAR10(quantize=True):
-    from torchvision.transforms import v2, InterpolationMode
-    disable_compilation(False)
-    trololo = TROLOLO(image_size=32,
-                      img_channels=3,
-                      patch_size=4,
-                      kernel_size=6,
-                      group_conv=True,
-                      num_layers=8,
-                      num_heads=(25,9),
-                      embed_dim=194,
-                      attention_dim="ceilheads",
-                      mlp_dim=512,
-                      n_class_tokens=2,
-                      num_classes=10,
-                      mlp_rank=0.1,
-                      qkv_rank=0.15,
-                      attnproj_rank=0.1,
-                      sequence_pyramid=[],
-                      attn_rank_pyramid=[],
-                      rank_pyramid_begin=2,
-                      rank_pyramid_factor=0.5,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
-                      attention_dropout=0.01,
-                      quantize_bits= None if not quantize else 8,
-                      activation=nn.Hardswish
-                      )
-    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
-    val_data = torchvision.datasets.CIFAR10(root="data/CIFAR10", download=True, train=False, transform=transform)
-    transform = torchvision.transforms.Compose(
-        [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
-         v2.RandomVerticalFlip(),
-         v2.RandomHorizontalFlip(),
-         v2.RandomChoice([
-             v2.RandomAdjustSharpness(sharpness_factor=0.8, p=0.15),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-             v2.RandomAdjustSharpness(sharpness_factor=1.2, p=0.15)
-         ]),
-         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.5),
-         v2.RandomResizedCrop(size=(32,32), scale=(0.5,1.0),antialias=False),
-         #v2.RandomPerspective(distortion_scale=0.3, p=0.1),
-         #v2.RandomChoice([
-         #    v2.RandomApply(torch.nn.ModuleList([
-         #        v2.RandomAffine(degrees=10, scale=(1.05, 1.10), interpolation=InterpolationMode.BILINEAR),
-         #    ]), p=0.25),
-         #    v2.ElasticTransform(alpha=50.0)
-         #]),
-         v2.ElasticTransform(alpha=50.0, fill=127),
-         v2.ToDtype(torch.float16, scale=True),
-         ],
-    )
-    pretrain_data = torchvision.datasets.CIFAR10(root="data/CIFAR10", download=True, train=True, transform=transform)
-    transform = torchvision.transforms.Compose(
-        [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
-         v2.RandomVerticalFlip(),
-         v2.RandomHorizontalFlip(),
-         v2.RandomChoice([
-             v2.RandomAdjustSharpness(sharpness_factor=0.8, p=0.15),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-             v2.RandomAdjustSharpness(sharpness_factor=1.2, p=0.15)
-         ]),
-         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
-         v2.RandomChoice([
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=0, translate=(0.15, 0.15), interpolation=InterpolationMode.NEAREST),
-             ]), p=0.75),
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=10, scale=(1.0, 1.10), interpolation=InterpolationMode.BILINEAR),
-             ]), p=0.25),
-             v2.RandomPerspective(distortion_scale=0.3, p=1.0),
-             v2.ElasticTransform(alpha=50.0)
-         ]),
-         v2.AugMix(severity=4),
-         v2.RandomErasing(p=0.8, scale=(0.0, 0.08), value='random'),
-         v2.RandomErasing(p=0.5, scale=(0.0, 0.08), value='random'),
-         v2.ToDtype(torch.float16, scale=True),
-         torchvision.transforms.v2.GaussianNoise(sigma=0.005),
-         ],
-    )
-    train_data = torchvision.datasets.CIFAR10(root="data/CIFAR10", download=True, train=True, transform=transform)
-    batch_size=64
-    trololo.pretraining_loop(train_data=pretrain_data, lr=1e-3, lr_mid=2.0e-4, lr_min=1e-6, n_epochs=300, batch_size=batch_size)
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=1e-3,lr_mid=2.0e-4,lr_min=1e-6,n_epochs=1500,batch_size=batch_size,transfer=200)
-    print("best acc: ",trololo.best_acc)
-
-def TROLOLO_Hahahahaha2(quantize=True):
-    # from dataloaders import get_dali_train_loader,get_dali_val_loader
-    from torchvision.transforms import v2, InterpolationMode
-    from dali_hard_mining import DALIHardMiningWrapper, extract_files_from_torch_dataset
-    from torch_to_dali_converter import validate_conversion
-    trololo = TROLOLO(image_size=64,
-                      img_channels=3,
-                      patch_size=4,
-                      kernel_size=8,
-                      group_conv=True,
-                      num_layers=6,
-                      num_heads=49,
-                      embed_dim=194,
-                      attention_dim="ceilheads",
-                      mlp_dim=194,
-                      n_class_tokens=2,
-                      num_classes=10,
-                      mlp_rank=0.05,
-                      qkv_rank=0.06,
-                      attnproj_rank=0.05,
-                      sequence_pyramid=[(2, 4)],
-                      attn_rank_pyramid=[(0, 32),(1, 32), (2, 32)],
-                      rank_pyramid_begin=2,
-                      rank_pyramid_factor=0.81,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
-                      attention_dropout=0.01,
-                      quantize_bits= None if not quantize else 8,
-                      activation=nn.Hardswish
-                      )
-    batch_size = 64
-    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
-    dataset = torchvision.datasets.ImageFolder("/home/pickman/Escritorio/TROLOLO/data/eurosat", transform=transform)
-    generator = torch.Generator().manual_seed(42)  # To always produce the same split.
-    _, val_data = random_split(dataset=dataset, lengths = [0.9, 0.1], generator=generator)
-    generator = torch.Generator().manual_seed(42)  # To always produce the same split.
-    transform_config = validate_conversion(transform)
-    val_data = DALIHardMiningWrapper(
-        data_path=val_data,
-        image_size=64,
-        batch_size=batch_size,
-        workers=16,
-        num_classes=10,
-        one_hot=False,
-        transform_config=transform_config
-    )
-    val_data.len=2700
-    transform = torchvision.transforms.Compose(
-        [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
-         v2.RandomVerticalFlip(),
-         v2.RandomHorizontalFlip(),
-         #v2.RandomChoice([
-         #    v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-         #    v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
-         #]),
-         #v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
-         #v2.RandomChoice([
-         #    v2.RandomApply(torch.nn.ModuleList([
-         #        v2.RandomAffine(degrees=0, translate=(0.02, 0.02), interpolation=InterpolationMode.NEAREST),
-         #    ]), p=0.75),
-         #    v2.RandomApply(torch.nn.ModuleList([
-         #        v2.RandomAffine(degrees=5, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
-         #    ]), p=0.25),
-         #]),
-         v2.ToDtype(torch.float16, scale=True),
-         #torchvision.transforms.v2.GaussianNoise(sigma=0.002),
-         ],
-    )
-    dataset = torchvision.datasets.ImageFolder("/home/pickman/Escritorio/TROLOLO/data/eurosat", transform=transform)
-    train_data, _ = random_split(dataset=dataset, lengths=[0.9, 0.1], generator=generator)
-    transform_config=validate_conversion(transform)
-    train_data = DALIHardMiningWrapper(
-        data_path=train_data,
-        image_size=64,
-        batch_size=batch_size,
-        workers=16,
-        num_classes=10,
-        one_hot=False,
-        transform_config=transform_config
-    )
-    train_data.len=24400
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=1000,batch_size=batch_size)
-    print("best acc: ",trololo.best_acc)
-
-def Eurosat(quantize=False):
-    # from dataloaders import get_dali_train_loader,get_dali_val_loader
-    from torchvision.transforms import v2, InterpolationMode
-    # from dali_hard_mining import DALIHardMiningWrapper, extract_files_from_torch_dataset
-    # from torch_to_dali_converter import validate_conversion
-    trololo = TROLOLO(image_size=64,
-                      img_channels=3,
-                      patch_size=4,
-                      kernel_size=6,
-                      num_layers=6,
-                      num_heads=48,
-                      embed_dim=192,
-                      mlp_dim=512,
-                      n_class_tokens=2,
-                      num_classes=10,
-                      mlp_rank=0.1,
-                      qkv_rank=0.2,
-                      attnproj_rank=0.1,
-                      sequence_pyramid=[(2, 4)],
-                      attn_rank_pyramid=[(0, 32), (1, 32)],
-                      rank_pyramid_begin=None,
-                      rank_pyramid_factor=None,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.2,
-                      attention_dropout=0.01,
-                      quantize_bits=None if not quantize else 8
-                      )
-    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor(),v2.ToDtype(torch.uint8, scale=True),v2.ToDtype(torch.float16, scale=True)])
-    dataset = torchvision.datasets.ImageFolder("/home/pickman/Escritorio/TROLOLO/data/eurosat", transform=transform)
-    generator = torch.Generator().manual_seed(42)  # To always produce the same split.
-    _, val_data = random_split(dataset=dataset, lengths = [0.9, 0.1], generator=generator)
-    generator = torch.Generator().manual_seed(42)  # To always produce the same split.
-    transform = torchvision.transforms.Compose(
-        [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
-         v2.RandomVerticalFlip(),
-         v2.RandomHorizontalFlip(),
-         v2.RandomChoice([
-             v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05), # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-             v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
-         ]),
-         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
-         v2.RandomChoice([
-             v2.RandomApply(torch.nn.ModuleList([
-                v2.RandomAffine(degrees=0, translate=(0.02,0.02), interpolation=InterpolationMode.NEAREST),
-                ]), p=0.75),
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=5, scale=(1.0,1.05), interpolation=InterpolationMode.BILINEAR),
-             ]), p=0.25),
-         ]),
-         v2.ToDtype(torch.float16, scale=True),
-         torchvision.transforms.v2.GaussianNoise(sigma=0.002),
-         ],
-    )
-    dataset = torchvision.datasets.ImageFolder("/home/pickman/Escritorio/TROLOLO/data/eurosat", transform=transform)
-    train_data, _ = random_split(dataset=dataset, lengths=[0.9, 0.1], generator=generator)
-    batch_size=64
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=1e-3,lr_mid=2.0e-4,lr_min=3e-5,n_epochs=1000,batch_size=batch_size)
-    print("best acc: ",trololo.best_acc)
-
-def Imagenet():
-    from dataloaders import get_dali_train_loader,get_dali_val_loader
-    # from torchvision.transforms import v2, InterpolationMode
-    from dali_hard_mining import DALIHardMiningWrapper, extract_files_from_torch_dataset
-    # from torch_to_dali_converter import validate_conversion
-    trololo = TROLOLO(image_size=256,
-                      img_channels=3,
-                      patch_size=16,
-                      kernel_size=18,
-                      num_layers=12,
-                      num_heads=24,
-                      embed_dim=974,
-                      attention_dim="floorheads",
-                      mlp_dim=2048,
-                      n_class_tokens=4,
-                      num_classes=1000,
-                      mlp_rank=0.1,
-                      qkv_rank=0.1,
-                      attnproj_rank=0.1,
-                      #sequence_pyramid=[(3, 4),(6,4)],
-                      sequence_pyramid=[(8, 4)],
-                      attn_rank_pyramid=[(0, 64), (1, 64), (2, 64), (3, 64), (4, 32), (5, 32), (6, 32), (7, 32), (8, 32)],
-                      rank_pyramid_begin=3,
-                      rank_pyramid_factor=0.8,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
-                      attention_dropout=0.01
-                      )
-    batch_size=128
-
-    train_loader, train_loader_len = get_dali_train_loader()(
-        data_path="/home/pickman/Escritorio/TROLOLO/data/Imagenet/",
-        image_size=256,
-        batch_size=batch_size,
-        num_classes=1000,
-        one_hot=False,
-        interpolation="bilinear",
-        augmentation="disabled",
-        start_epoch=0,
-        workers=16,
-        _worker_init_fn=None,
-        memory_format=torch.contiguous_format
-    )
-    """
-    train_loader = DALIHardMiningWrapper(
-        data_path="/home/pickman/Escritorio/TROLOLO/data/Imagenet/train",
-        image_size=256,
-        batch_size=batch_size,
-        workers=16,
-        num_classes=1000,
-        one_hot=False
-    )
-    train_loader_len=1280000//batch_size
-    """
-    val_loader, val_loader_len = get_dali_val_loader()(
-        data_path="/home/pickman/Escritorio/TROLOLO/data/Imagenet/",
-        image_size=256,
-        batch_size=batch_size,
-        num_classes=1000,
-        one_hot=False,
-        interpolation="bilinear",
-        crop_padding=32,
-        workers=16,
-        _worker_init_fn=None,
-        memory_format=torch.contiguous_format
-    )
-    train_loader.len=train_loader_len*batch_size
-    val_loader.len=val_loader_len*batch_size
-    train_data=train_loader
-    val_data=val_loader
-    #transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor(),v2.Resize([256]),v2.CenterCrop(224)])
-    #train_data = torchvision.datasets.ImageNet(root="/home/pickman/Escritorio/TROLOLO/data/Imagenet",split="train",transform=transform)
-    #val_data = torchvision.datasets.ImageNet(root="/home/pickman/Escritorio/TROLOLO/data/Imagenet",split="val",transform=transform)
-    lr_scaling=TROLOLOLR_Scheduler.lr_scale(batch_size=(batch_size,64),dims=[(trololo.embed_dim,192),(trololo.mlp_dim,512)],num_layers=(trololo.num_layers,6))
-    pre_epochs=0
-    if pre_epochs > 0:
-        trololo.pretraining_loop(train_data=train_data, lr=lr_scaling * 8e-4, lr_mid=lr_scaling * 3.0e-4, lr_min=lr_scaling * 1e-5, n_epochs=pre_epochs, batch_size=batch_size)
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=lr_scaling*2e-3,lr_mid=lr_scaling*1.0e-4,lr_min=lr_scaling*1e-6,n_epochs=300,batch_size=batch_size,transfer=pre_epochs)
-    print("best acc: ",trololo.best_acc)
-
-def calcTROLOPS():
-    from calflops import calculate_flops
-    torch._dynamo.config.disable = True
-    torch.backends.cuda.enable_cudnn_sdp(False)
-    torch.backends.cuda.enable_flash_sdp(False)
-    torch.backends.cuda.enable_mem_efficient_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
-
-    trololo = TROLOLO(image_size=224,
-                      img_channels=3,
-                      patch_size=16,
-                      kernel_size=22,
-                      num_layers=6,
-                      num_heads=48,
-                      embed_dim=1536,
-                      mlp_dim=2048,
-                      n_class_tokens=2,
-                      num_classes=1000,
-                      mlp_rank=0.02,
-                      qkv_rank=0.05,
-                      attnproj_rank=0.02,
-                      sequence_pyramid=[(2, 4)],
-                      attn_rank_pyramid=[(0, 64), (1, 64)],
-                      rank_pyramid_begin=2,
-                      rank_pyramid_factor=1.0,
-                      head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.0,
-                      attention_dropout=0.00
-                      )
-    trololo.cpu()
-    calculate_flops(model=trololo,input_shape=(4,3,224,224),print_results=True)
-
-if __name__ == "__main__":
-    #calcTROLOPS()
-    #Imagenet()
-    #Eurosat()
-    #TROLOLO_Hahahahaha2(quantize=True)
-    TROLOLO_Hahahahaha(quantize=True)
-    MNIST(quantize=True)
-    #CIFAR10(quantize=False)
