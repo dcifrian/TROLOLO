@@ -11,8 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from torch.utils.data import random_split
 
 from TROLOLO.TROLOLO import *
+from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
+import torchvision
 
 
 def TROLOLO_Hahahahaha(quantize=True):
@@ -43,6 +46,7 @@ def TROLOLO_Hahahahaha(quantize=True):
                       quantize_bits= None if not quantize else 8,
                       activation=nn.Hardswish
                       )
+    trainer = TROLOLO_Trainer(trololo=trololo)
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     generator = torch.Generator().manual_seed(42)  # To always produce the same split.
@@ -79,9 +83,9 @@ def TROLOLO_Hahahahaha(quantize=True):
     train_data, _ = random_split(dataset=dataset, lengths=[0.9, 0.1], generator=generator)
     batch_size=64
     infinitesat = torchvision.datasets.ImageFolder("data/infinitesat/images", transform=transform)
-    #trololo.pretraining_loop(train_data=infinitesat, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=2, batch_size=batch_size)
-    #trololo.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=300, batch_size=batch_size)
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=2000,batch_size=batch_size,transfer=0) # transfer 500
+    #trainer.pretraining_loop(train_data=infinitesat, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=2, batch_size=batch_size)
+    #trainer.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=300, batch_size=batch_size)
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=2000,batch_size=batch_size,transfer=0) # transfer 500
 
 
 
@@ -115,6 +119,7 @@ def TROLOLO_Hahahahaha2(quantize=True):
                       quantize_bits= None if not quantize else 8,
                       activation=nn.Hardswish
                       )
+    trainer = TROLOLO_Trainer(trololo=trololo)
     batch_size = 64
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
@@ -167,7 +172,7 @@ def TROLOLO_Hahahahaha2(quantize=True):
         transform_config=transform_config
     )
     train_data.len=24400
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=1000,batch_size=batch_size)
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=1000,batch_size=batch_size)
 
 if __name__ == "__main__":
     #TROLOLO_Hahahahaha2(quantize=True)

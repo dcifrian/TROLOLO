@@ -11,14 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import torchvision
+from torch.utils.data import random_split
 
 from TROLOLO.TROLOLO import *
+from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
 
 def Eurosat(quantize=False):
     # from dataloaders import get_dali_train_loader,get_dali_val_loader
     from torchvision.transforms import v2, InterpolationMode
     # from dali_hard_mining import DALIHardMiningWrapper, extract_files_from_torch_dataset
     # from torch_to_dali_converter import validate_conversion
+    disable_compilation(False)
     trololo = TROLOLO(image_size=64,
                       img_channels=3,
                       patch_size=4,
@@ -41,6 +45,7 @@ def Eurosat(quantize=False):
                       attention_dropout=0.01,
                       quantize_bits=None if not quantize else 8
                       )
+    trainer = TROLOLO_Trainer(trololo=trololo)
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor(),v2.ToDtype(torch.uint8, scale=True),v2.ToDtype(torch.float16, scale=True)])
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     generator = torch.Generator().manual_seed(42)  # To always produce the same split.
@@ -71,7 +76,7 @@ def Eurosat(quantize=False):
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     train_data, _ = random_split(dataset=dataset, lengths=[0.9, 0.1], generator=generator)
     batch_size=64
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=1e-3,lr_mid=2.0e-4,lr_min=3e-5,n_epochs=1000,batch_size=batch_size)
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=1e-3,lr_mid=2.0e-4,lr_min=3e-5,n_epochs=1000,batch_size=batch_size)
 
 if __name__ == "__main__":
     Eurosat()

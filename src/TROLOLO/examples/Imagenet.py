@@ -11,14 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import torchvision
 
+from TROLOLO.TROLOLOLR_Scheduler import *
 from TROLOLO.TROLOLO import *
+from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
 
 def Imagenet():
     #from TROLOLO.dataloaders import get_dali_train_loader,get_dali_val_loader
     from torchvision.transforms import v2, InterpolationMode
     from TROLOLO.dali_hard_mining import DALIHardMiningWrapper, extract_files_from_torch_dataset
     from TROLOLO.torch_to_dali_converter import validate_conversion
+    disable_compilation(False)
     trololo = TROLOLO(image_size=256,
                       img_channels=3,
                       patch_size=16,
@@ -42,6 +46,7 @@ def Imagenet():
                       dropout=0.05,
                       attention_dropout=0.01
                       )
+    trainer = TROLOLO_Trainer(trololo=trololo)
     batch_size=128
     """
     train_loader, train_loader_len = get_dali_train_loader()(
@@ -89,8 +94,8 @@ def Imagenet():
     lr_scaling=TROLOLOLR_Scheduler.lr_scale(batch_size=(batch_size,64),dims=[(trololo.embed_dim,192),(trololo.mlp_dim,512)],num_layers=(trololo.num_layers,6))
     pre_epochs=0
     if pre_epochs > 0:
-        trololo.pretraining_loop(train_data=train_data, lr=lr_scaling * 8e-4, lr_mid=lr_scaling * 3.0e-4, lr_min=lr_scaling * 1e-5, n_epochs=pre_epochs, batch_size=batch_size)
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=lr_scaling*2e-3,lr_mid=lr_scaling*1.0e-4,lr_min=lr_scaling*1e-6,n_epochs=300,batch_size=batch_size,transfer=pre_epochs)
+        trainer.pretraining_loop(train_data=train_data, lr=lr_scaling * 8e-4, lr_mid=lr_scaling * 3.0e-4, lr_min=lr_scaling * 1e-5, n_epochs=pre_epochs, batch_size=batch_size)
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=lr_scaling*2e-3,lr_mid=lr_scaling*1.0e-4,lr_min=lr_scaling*1e-6,n_epochs=300,batch_size=batch_size,transfer=pre_epochs)
 
 if __name__ == "__main__":
     Imagenet()

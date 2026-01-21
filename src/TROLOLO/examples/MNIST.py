@@ -11,13 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import torchvision
 
 from TROLOLO.TROLOLO import *
-
+from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
 
 def MNIST(quantize=True):
     from torchvision.transforms import v2, InterpolationMode
-    disable_compilation(False)
+    disable_compilation(True)
     trololo = TROLOLO(image_size=28,
                       img_channels=1,
                       patch_size=2,
@@ -43,6 +44,7 @@ def MNIST(quantize=True):
                       quantize_bits= None if not quantize else 8,
                       activation=nn.Hardswish
                       )
+    trainer = TROLOLO_Trainer(trololo=trololo)
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
     val_data = torchvision.datasets.MNIST(root="data/MNIST", download=True, train=False, transform=transform)
     transform = torchvision.transforms.Compose(
@@ -71,10 +73,8 @@ def MNIST(quantize=True):
     )
     train_data = torchvision.datasets.MNIST(root="data/MNIST", download=True, train=True, transform=transform)
     batch_size=64
-    #trololo.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=200, batch_size=batch_size)
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=300,batch_size=batch_size,transfer=0)
-    print("best acc: ",trololo.best_acc)
-
+    trainer.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=2, batch_size=batch_size)
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=300,batch_size=batch_size,transfer=10)
 
 if __name__ == "__main__":
     MNIST(quantize=True)

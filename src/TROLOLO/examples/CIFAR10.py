@@ -13,36 +13,40 @@
 # limitations under the License.
 
 from TROLOLO.TROLOLO import *
+from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
+from torchvision.transforms import v2, InterpolationMode
+import torchvision
+from TROLOLO.TROLOLOLR_Scheduler import *
 
 def CIFAR10(quantize=True):
-    from torchvision.transforms import v2, InterpolationMode
     disable_compilation(False)
     trololo = TROLOLO(image_size=32,
                       img_channels=3,
-                      patch_size=4,
-                      kernel_size=6,
-                      group_conv=True,
-                      num_layers=8,
+                      patch_size=2,
+                      kernel_size=8,
+                      group_conv=False,
+                      num_layers=6,
                       #num_heads=(25,9),
-                      num_heads=16,
-                      embed_dim=194,
+                      num_heads=32,
+                      embed_dim=384,
                       attention_dim="ceilheads",
-                      mlp_dim=512,
+                      mlp_dim=768,
                       n_class_tokens=2,
                       num_classes=10,
-                      mlp_rank=0.1,
-                      qkv_rank=0.15,
-                      attnproj_rank=0.1,
-                      sequence_pyramid=[],
-                      attn_rank_pyramid=[],
+                      mlp_rank=0.05,
+                      qkv_rank=0.10,
+                      attnproj_rank=0.05,
+                      sequence_pyramid=[(2, 4)],
+                      attn_rank_pyramid=[(0, 64),(1, 32), (2, 32)],
                       rank_pyramid_begin=2,
                       rank_pyramid_factor=0.5,
                       head_constriction="ONE_CLASS_TOKEN",
-                      dropout=0.05,
+                      dropout=0.15,
                       attention_dropout=0.01,
                       quantize_bits= None if not quantize else 8,
                       activation=nn.Hardswish
                       )
+    trainer = TROLOLO_Trainer(trololo)
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
     val_data = torchvision.datasets.CIFAR10(root="data/CIFAR10", download=True, train=False, transform=transform)
     transform = torchvision.transforms.Compose(
@@ -80,13 +84,13 @@ def CIFAR10(quantize=True):
          v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
          v2.RandomChoice([
              v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=0, translate=(0.15, 0.15), interpolation=InterpolationMode.NEAREST),
+                 v2.RandomAffine(degrees=0, translate=(0.1, 0.1), interpolation=InterpolationMode.NEAREST),
              ]), p=0.75),
              v2.RandomApply(torch.nn.ModuleList([
                  v2.RandomAffine(degrees=10, scale=(1.0, 1.10), interpolation=InterpolationMode.BILINEAR),
              ]), p=0.25),
-             v2.RandomPerspective(distortion_scale=0.3, p=1.0),
-             v2.ElasticTransform(alpha=250, sigma=7, fill=127),
+             v2.RandomPerspective(distortion_scale=0.15, p=1.0),
+             v2.ElasticTransform(alpha=350, sigma=7, fill=127),
          ]),
          v2.AugMix(severity=3),
          v2.RandomErasing(p=0.8, scale=(0.0, 0.04), value='random'),
@@ -96,10 +100,11 @@ def CIFAR10(quantize=True):
          ],
     )
     train_data = torchvision.datasets.CIFAR10(root="data/CIFAR10", download=True, train=True, transform=transform)
-    batch_size=64
-    trololo.pretraining_loop(train_data=pretrain_data, lr=1e-3, lr_mid=2.0e-4, lr_min=1e-6, n_epochs=300, batch_size=batch_size)
-    trololo.training_loop(train_data=train_data,val_data=val_data,lr=1e-3,lr_mid=2.0e-4,lr_min=1e-6,n_epochs=1500,batch_size=batch_size,transfer=200)
-    print("best acc: ",trololo.best_acc)
+    batch_size=100
+    lr_scaling = TROLOLOLR_Scheduler.lr_scale(batch_size=(batch_size, 64), dims=[(trololo.embed_dim, 192), (trololo.mlp_dim, 512)], num_layers=(trololo.num_layers, 6))
+    #trainer.pretraining_loop(train_data=pretrain_data, lr=lr_scaling*1e-3, lr_mid=lr_scaling*2.0e-4, lr_min=lr_scaling*1e-6, n_epochs=100, batch_size=batch_size)
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=lr_scaling*1e-3,lr_mid=lr_scaling*2.0e-4,lr_min=lr_scaling*1e-6,n_epochs=1500,batch_size=batch_size,transfer=0)
+
 
 if __name__ == "__main__":
     CIFAR10(quantize=False)
