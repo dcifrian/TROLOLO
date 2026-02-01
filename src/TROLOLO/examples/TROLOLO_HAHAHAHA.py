@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from torch.utils.data import random_split
+from torchvision.transforms import InterpolationMode
 
+from TROLOLO.TROLOLOLR_Scheduler import *
 from TROLOLO.TROLOLO import *
-from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
+from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer, show_batch
 import torchvision
 
 
@@ -37,7 +39,7 @@ def TROLOLO_Hahahahaha(quantize=True):
                       qkv_rank=0.06,
                       attnproj_rank=0.05,
                       sequence_pyramid=[(2, 4)],
-                      attn_rank_pyramid=[(0, 32),(1, 32), (2, 32)],
+                      attn_rank_pyramid=[(0, 32),(1, 16), (2, 16)],
                       rank_pyramid_begin=2,
                       rank_pyramid_factor=0.81,
                       head_constriction="ONE_CLASS_TOKEN",
@@ -46,54 +48,58 @@ def TROLOLO_Hahahahaha(quantize=True):
                       quantize_bits= None if not quantize else 8,
                       activation=nn.Hardswish
                       )
-    trainer = TROLOLO_Trainer(trololo=trololo)
+    trainer = TROLOLO_Trainer(trololo=trololo,experiment_name="Eurosat_96K")
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     generator = torch.Generator().manual_seed(42)  # To always produce the same split.
     _, val_data = random_split(dataset=dataset, lengths = [0.9, 0.1], generator=generator)
     generator = torch.Generator().manual_seed(42)  # To always produce the same split.
-    transform = torchvision.transforms.Compose(
-        [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
-         v2.RandomVerticalFlip(),
-         v2.RandomHorizontalFlip(),
-         v2.RandomChoice([
-             v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-             v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
-         ]),
-         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
-         v2.RandomChoice([
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=0, translate=(0.02, 0.02), interpolation=InterpolationMode.NEAREST),
-             ]), p=0.75),
-             v2.RandomApply(torch.nn.ModuleList([
-                 v2.RandomAffine(degrees=5, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
-             ]), p=0.25),
-             v2.ElasticTransform(alpha=150, sigma=6, fill=127),
-         ]),
-         v2.AugMix(severity=2),
-         v2.RandomErasing(p=0.8, scale=(0.0, 0.05), value='random'),
-         v2.RandomErasing(p=0.5, scale=(0.0, 0.05), value='random'),
-         v2.ToDtype(torch.float16, scale=True),
-         torchvision.transforms.v2.GaussianNoise(sigma=0.002),
-         ],
-    )
-    transform.__call__ = torch.compile(transform.__call__)
+    transform = torchvision.transforms.Compose([
+        torchvision.transforms.ToTensor(),
+        v2.ToDtype(torch.uint8, scale=True),
+        v2.RandomHorizontalFlip(),
+        v2.RandomChoice([
+            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
+            v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
+        ]),
+        v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
+        v2.AugMix(severity=2),
+    ])
+    transform_gpu = torchvision.transforms.Compose([
+        v2.Lambda(lambda x: nn.functional.pad(x, (63, 63, 63, 63), mode='circular')),
+        v2.RandomAffine(degrees=180, interpolation=InterpolationMode.BILINEAR),
+        v2.RandomChoice([
+            v2.RandomApply(torch.nn.ModuleList([
+             v2.RandomAffine(degrees=0, translate=(0.25, 0.25), interpolation=InterpolationMode.NEAREST),
+            ]), p=0.75),
+            v2.RandomApply(torch.nn.ModuleList([
+             v2.RandomAffine(degrees=0, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
+            ]), p=0.25),
+            v2.ElasticTransform(alpha=50, sigma=5),
+        ]),
+        v2.CenterCrop(size=(64, 64)),
+        v2.RandomErasing(p=0.8, scale=(0.0, 0.05), value='random'),
+        v2.RandomErasing(p=0.5, scale=(0.0, 0.05), value='random'),
+        v2.ToDtype(torch.float16, scale=True),
+        #torchvision.transforms.v2.GaussianNoise(sigma=0.002),
+    ])
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     train_data, _ = random_split(dataset=dataset, lengths=[0.9, 0.1], generator=generator)
-    batch_size=64
-    infinitesat = torchvision.datasets.ImageFolder("data/infinitesat/images", transform=transform)
+    #show_batch(train_data)
+    batch_size=100
+    lr_scaling = TROLOLOLR_Scheduler.lr_scale(batch_size=(batch_size, 64), dims=[(trololo.embed_dim, 192), (trololo.mlp_dim, 512)], num_layers=(trololo.num_layers, 6))
+    #infinitesat = torchvision.datasets.ImageFolder("data/infinitesat/images", transform=transform)
     #trainer.pretraining_loop(train_data=infinitesat, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=2, batch_size=batch_size)
     #trainer.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=300, batch_size=batch_size)
-    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=2000,batch_size=batch_size,transfer=0) # transfer 500
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3*lr_scaling,lr_mid=2.0e-4*lr_scaling,lr_min=5e-6*lr_scaling,n_epochs=2000,batch_size=batch_size,transfer=0,transforms=transform_gpu)
 
 
 
-def TROLOLO_Hahahahaha2(quantize=True):
-    # from dataloaders import get_dali_train_loader,get_dali_val_loader
-    from torchvision.transforms import v2, InterpolationMode
-    from TROLOLO.dali_hard_mining import DALIHardMiningWrapper, extract_files_from_torch_dataset
-    from TROLOLO.torch_to_dali_converter import validate_conversion
+def TROLOLO_Hahahahaha_DALI(quantize=True):
+    from torchvision.transforms import v2
+    from DALI_HardMining.dali_hard_mining import DALIHardMiningWrapper, extract_files_from_torch_dataset
+    from DALI_HardMining.torch_to_dali_converter import validate_conversion
+    disable_compilation(False)
     trololo = TROLOLO(image_size=64,
                       img_channels=3,
                       patch_size=4,
@@ -110,7 +116,7 @@ def TROLOLO_Hahahahaha2(quantize=True):
                       qkv_rank=0.06,
                       attnproj_rank=0.05,
                       sequence_pyramid=[(2, 4)],
-                      attn_rank_pyramid=[(0, 32),(1, 32), (2, 32)],
+                      attn_rank_pyramid=[(0, 32),(1, 16), (2, 16)],
                       rank_pyramid_begin=2,
                       rank_pyramid_factor=0.81,
                       head_constriction="ONE_CLASS_TOKEN",
@@ -119,62 +125,60 @@ def TROLOLO_Hahahahaha2(quantize=True):
                       quantize_bits= None if not quantize else 8,
                       activation=nn.Hardswish
                       )
-    trainer = TROLOLO_Trainer(trololo=trololo)
-    batch_size = 64
+    trainer = TROLOLO_Trainer(trololo=trololo,experiment_name="Eurosat-DALI")
+    batch_size = 100
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     generator = torch.Generator().manual_seed(42)  # To always produce the same split.
     _, val_data = random_split(dataset=dataset, lengths = [0.9, 0.1], generator=generator)
-    generator = torch.Generator().manual_seed(42)  # To always produce the same split.
-    transform_config = validate_conversion(transform)
     val_data = DALIHardMiningWrapper(
         data_path=val_data,
         image_size=64,
         batch_size=batch_size,
-        workers=16,
+        workers=4,
         num_classes=10,
         one_hot=False,
-        transform_config=transform_config
     )
-    val_data.len=2700
-    transform = torchvision.transforms.Compose(
-        [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
-         v2.RandomVerticalFlip(),
-         v2.RandomHorizontalFlip(),
-         #v2.RandomChoice([
-         #    v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-         #    v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
-         #]),
-         #v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
-         #v2.RandomChoice([
-         #    v2.RandomApply(torch.nn.ModuleList([
-         #        v2.RandomAffine(degrees=0, translate=(0.02, 0.02), interpolation=InterpolationMode.NEAREST),
-         #    ]), p=0.75),
-         #    v2.RandomApply(torch.nn.ModuleList([
-         #        v2.RandomAffine(degrees=5, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
-         #    ]), p=0.25),
-         #]),
-         v2.ToDtype(torch.float16, scale=True),
-         #torchvision.transforms.v2.GaussianNoise(sigma=0.002),
-         ],
-    )
+    generator = torch.Generator().manual_seed(42)  # To always produce the same split.
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     train_data, _ = random_split(dataset=dataset, lengths=[0.9, 0.1], generator=generator)
-    transform_config=validate_conversion(transform)
     train_data = DALIHardMiningWrapper(
         data_path=train_data,
         image_size=64,
         batch_size=batch_size,
-        workers=16,
+        workers=4,
         num_classes=10,
         one_hot=False,
-        transform_config=transform_config
     )
-    train_data.len=24400
-    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=4.0e-4,lr_min=3e-5,n_epochs=1000,batch_size=batch_size)
+    transform_gpu = torchvision.transforms.Compose([
+        v2.RandomHorizontalFlip(),
+        v2.RandomChoice([
+            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
+            v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
+        ]),
+        v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
+        v2.AugMix(severity=1,alpha=0.8),
+        v2.Lambda(lambda x: nn.functional.pad(x, (63, 63, 63, 63), mode='circular')),
+        v2.RandomAffine(degrees=180, interpolation=InterpolationMode.BILINEAR),
+        v2.RandomChoice([
+            v2.RandomApply(torch.nn.ModuleList([
+             v2.RandomAffine(degrees=0, translate=(0.25, 0.25), interpolation=InterpolationMode.NEAREST),
+            ]), p=0.75),
+            v2.RandomApply(torch.nn.ModuleList([
+             v2.RandomAffine(degrees=0, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
+            ]), p=0.25),
+            v2.ElasticTransform(alpha=100, sigma=6),
+        ]),
+        v2.CenterCrop(size=(64, 64)),
+        v2.RandomErasing(p=0.8, scale=(0.0, 0.05), value='random'),
+        v2.RandomErasing(p=0.5, scale=(0.0, 0.05), value='random'),
+        v2.GaussianNoise(sigma=0.002),
+    ])
+    #show_batch(train_data,transforms=transform_gpu)
+    lr_scaling = TROLOLOLR_Scheduler.lr_scale(batch_size=(batch_size, 64), dims=[(trololo.embed_dim, 192), (trololo.mlp_dim, 512)], num_layers=(trololo.num_layers, 6))
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3*lr_scaling,lr_mid=2.0e-4*lr_scaling,lr_min=1e-6*lr_scaling,n_epochs=2000,batch_size=batch_size,transfer=0,transforms=transform_gpu)
 
 if __name__ == "__main__":
-    #TROLOLO_Hahahahaha2(quantize=True)
-    TROLOLO_Hahahahaha(quantize=True)
+    #TROLOLO_Hahahahaha(quantize=True)
+    TROLOLO_Hahahahaha_DALI(quantize=True)
 

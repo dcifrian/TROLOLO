@@ -1,4 +1,8 @@
+import multiprocessing
+from datetime import datetime
+
 import torchvision
+import torchvision.transforms.v2 as v2
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -7,8 +11,10 @@ from TROLOLO.TROLOLOLR_Scheduler import TROLOLOLR_Scheduler
 
 
 class TROLOLO_Trainer:
-    def __init__(self,trololo:TROLOLO|RETROLOLO):
+    def __init__(self,trololo:TROLOLO|RETROLOLO,experiment_name=None):
         self.trololo = trololo
+        logical_cores = multiprocessing.cpu_count()
+        self.n_dataloader_threads= max(1, (logical_cores // 2) - 1)
         self.best_acc = 0
         self.best_loss = 10000.0
         self.acc_stream = torch.cuda.Stream(priority=1)
@@ -19,8 +25,15 @@ class TROLOLO_Trainer:
         self.default_stream = torch.cuda.default_stream()  # Workaround because inductor can't figure out why something in torch.* doesn't return a tensor
         self.data_ready_event = torch.cuda.Event()
         self.data_used_event = torch.cuda.Event()
+        self.experiment_name = experiment_name
+        self.loss_fn_classifier=nn.CrossEntropyLoss
+        self.loss_fn_prediction=nn.MSELoss
+        self.writer = None
+        if experiment_name is not None:
+            from torch.utils.tensorboard import SummaryWriter
+            self.writer = SummaryWriter(f'runs/{experiment_name}{datetime.now().strftime("%Y%m%d-%H%M%S")}')
         
-    def pretraining_loop(self,train_data,lr,lr_mid,lr_min,n_epochs,batch_size,cut_size=8):
+    def pretraining_MAE_loop(self,train_data,lr,lr_mid,lr_min,n_epochs,batch_size,cut_size=8,transforms=None):
         from torchvision.transforms import v2, InterpolationMode
         self.trololo.cuda()
         #Performing head surgery
@@ -29,7 +42,7 @@ class TROLOLO_Trainer:
         heads_layers["head"] = nn.Linear(self.trololo.head_input_size,self.trololo.conv_proj.in_channels * cut_size ** 2, device="cuda")
         self.trololo.heads = nn.Sequential(heads_layers)
         if isinstance(train_data,torch.utils.data.dataset.Dataset):
-            train_dataloader = DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True, pin_memory=True, prefetch_factor=10, num_workers=15, persistent_workers=True)
+            train_dataloader = DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True, pin_memory=True, prefetch_factor=10, num_workers=self.n_dataloader_threads, persistent_workers=True)
         else:
             train_dataloader = train_data
         datalength = len(train_dataloader.dataset)
@@ -52,6 +65,8 @@ class TROLOLO_Trainer:
             i=0
             for data in train_dataloader:
                 X_batch = data[0]
+                if transforms is not None:
+                    X_batch=transforms(X_batch.cuda())
                 curr_bs = X_batch.shape[0]
                 re = torchvision.transforms.RandomErasing.get_params(X_batch, scale=((cut_size/ self.trololo.image_size) ** 2, (cut_size/self.trololo.image_size) ** 2), ratio=(1.0, 1.0), value=[0])
                 y_Batch = v2.functional.crop(X_batch,re[0],re[1],re[2],re[3]).cuda().reshape(curr_bs, -1)
@@ -93,6 +108,7 @@ class TROLOLO_Trainer:
         loss_fn = self.trololo.loss_fn
         accuracies = []
         accuracies5 = []
+        losses = []
         with (torch.inference_mode(),torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16)):
             x_gpu = self.trololo.preallocate_inputs(batch_size)
             y_gpu = self.trololo.preallocate_class_indices(batch_size)
@@ -105,21 +121,23 @@ class TROLOLO_Trainer:
                 loss,accuracy,acc5 = self.validation_batch(x, y, y_onehot , acc_stream, loss_fn)
                 accuracies.append(accuracy)
                 accuracies5.append(acc5)
+                losses.append(loss)
                 loss=loss.item()
                 accuracy=accuracy.item()
                 progressBar.set_postfix(loss=loss, acc=accuracy ,best=self.best_acc)
                 progressBar.update(len(y_batch))
+            loss = torch.mean(torch.stack(losses))
             accuracy = torch.mean(torch.stack(accuracies))
             accuracy5 = torch.mean(torch.stack(accuracies5))
             if accuracy > self.best_acc:
                 self.best_acc = accuracy.item()
                 torch.save(self.trololo.state_dict(),"trololo.weight")
             if self.trololo.num_classes > 50:
-                force_pbar_setpostfix(progressBar,loss=loss, acc=f"{accuracy.item():.5f}", acc5=f"{accuracy5.item():.5f}", best=f"{self.best_acc:.5f}")
+                force_pbar_setpostfix(progressBar,loss=loss.item(), acc=f"{accuracy.item():.5f}", acc5=f"{accuracy5.item():.5f}", best=f"{self.best_acc:.5f}")
             else:
-                force_pbar_setpostfix(progressBar,loss=loss, acc=f"{accuracy.item():.5f}", best=f"{self.best_acc:.5f}")
+                force_pbar_setpostfix(progressBar,loss=loss.item(), acc=f"{accuracy.item():.5f}", best=f"{self.best_acc:.5f}")
             progressBar.close()
-        return accuracy,accuracy5
+        return loss,accuracy,accuracy5
 
     def validation_batch(self, x, y, y_onehot , acc_stream, loss_fn):
         with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
@@ -128,7 +146,7 @@ class TROLOLO_Trainer:
             with torch.cuda.stream(acc_stream):
                 acc_stream.wait_stream(self.default_stream)
                 accuracy = (y_pred.detach().argmax(1) == y).float().mean()
-                _, top5_preds = torch.topk(y_pred.detach(), k=5, dim=1)
+                _, top5_preds = torch.topk(y_pred.detach(), k=min(5,self.trololo.num_classes), dim=1)
                 acc5 = (top5_preds == y.unsqueeze(1)).any(dim=1).float().mean()
             #   acc_event.record()
             # torch.cuda.synchronize()  # Force everything to finish
@@ -136,7 +154,7 @@ class TROLOLO_Trainer:
             loss = loss_fn(y_pred, y_onehot)
         return loss,accuracy,acc5
 
-    def transfer_loop(self,lr,epochs,train_dataloader,batch_size):
+    def transfer_loop(self,lr,epochs,train_dataloader,batch_size,transforms=None):
         self.trololo.train()
         acc_stream = torch.cuda.Stream(priority=1)
         onehot_stream = torch.cuda.Stream(priority=1)
@@ -175,6 +193,8 @@ class TROLOLO_Trainer:
                         break
                 X_batch = data[0]
                 y_batch = data[1]
+                if transforms is not None:
+                    X_batch=transforms(X_batch.cuda())
                 with torch.compiler.set_stance("force_eager"):
                     x, y, y_onehot = self.copy_batch_to_preallocated(y_batch=y_batch, y_gpu=y_gpu, onehot_stream=onehot_stream, y_gpu_onehot=y_gpu_onehot, x_gpu=x_gpu, X_batch=X_batch)
                     loss,_,_,accuracy,acc5 = self.train_batch(
@@ -198,7 +218,7 @@ class TROLOLO_Trainer:
         for param in self.trololo.parameters():
             param.requires_grad = True
 
-    def training_loop(self,train_data,val_data,lr,lr_mid,lr_min,n_epochs,batch_size,transfer=0):
+    def training_loop(self,train_data,val_data,lr,lr_mid,lr_min,n_epochs,batch_size,transfer=0, weight_decay=1e-4,labelsmoothing=0.1,transforms=None):
         self.trololo.cuda()
         coptions=COMPILE_OPTIONS.copy()
         coptions["triton.cudagraphs"] = False  # The cudagraphs don't work with cpu tensors and the next function has both cpu and gpu tensors.
@@ -212,30 +232,26 @@ class TROLOLO_Trainer:
         onehot_stream = torch.cuda.Stream(priority=1)
         onehot_event = torch.cuda.Event()
         loss_fn_nosmooth=nn.CrossEntropyLoss(reduction="none")
-        labelsmoothing=0.1
-        start_smoothing_th = 0.3 + 0.05* math.log(0.1*self.trololo.num_classes)
+        start_smoothing_th = 0.3 + abs(0.05* math.log(0.1*self.trololo.num_classes))
         notSmoothing=True
         expected_random_loss=math.log(self.trololo.num_classes)
         val_batch_size=1*batch_size
         if isinstance(train_data,torch.utils.data.dataset.Dataset):
-            train_dataloader = DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True, pin_memory=True, prefetch_factor=10, num_workers=15, persistent_workers=True)
+            train_dataloader = DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True, pin_memory=True, prefetch_factor=10, num_workers=self.n_dataloader_threads, persistent_workers=True)
             datalength = len(train_data)
         else:
-            datalength = train_data.len
-            #datalength = train_data.dataset.num_samples
+            datalength = len(train_data.dataset)
             train_dataloader = train_data
             #sampleWeights= train_data.dataset.weights.copy()
-        #datalength = len(train_dataloader.dataset)
-        #datalength = train_dataloader.len
         if isinstance(val_data,torch.utils.data.dataset.Dataset):
-            val_dataloader = DataLoader(dataset=val_data, batch_size= val_batch_size, shuffle=False, pin_memory=True, prefetch_factor=10, num_workers=15, persistent_workers=True)
+            val_dataloader = DataLoader(dataset=val_data, batch_size= val_batch_size, shuffle=False, pin_memory=True, prefetch_factor=10, num_workers=self.n_dataloader_threads, persistent_workers=True)
         else:
             val_dataloader=val_data
         n_batches =  datalength // batch_size
         if transfer:
             self.transfer_loop(lr=lr_mid/10.0,epochs=transfer,train_dataloader=train_dataloader,batch_size=batch_size)
         scaler = torch.amp.GradScaler()
-        optimizer = torch.optim.AdamW(self.trololo.parameters(), lr=lr,weight_decay=1e-2)
+        optimizer = torch.optim.AdamW(self.trololo.parameters(), lr=lr,weight_decay=weight_decay)
         lr_sched = TROLOLOLR_Scheduler.semiauto(optimizer=optimizer,
                                                 lr_peak=lr,lr_mid=lr_mid,lr_min=lr_min,
                                                 n_epochs=n_epochs,n_batches=n_batches,batch_size=batch_size,
@@ -260,6 +276,8 @@ class TROLOLO_Trainer:
                 X_batch = data[0]
                 y_batch = data[1]
                 indexes = data[2] if len(data)==3 else None
+                if transforms is not None:
+                    X_batch=transforms(X_batch.cuda())
                 x, y, y_onehot = self.copy_batch_to_preallocated(y_batch=y_batch,y_gpu=y_gpu,onehot_stream=onehot_stream,y_gpu_onehot=y_gpu_onehot,x_gpu=x_gpu,X_batch=X_batch)
                 loss, unsmooth_loss, unsmooth_loss_batch, accuracy, acc5 = self.train_batch(
                     x=x, y=y, y_onehot=y_onehot, acc_stream=acc_stream,loss_fn=loss_fn,loss_fn_nosmooth=loss_fn_nosmooth, optimizer=optimizer,scaler=scaler)
@@ -279,8 +297,7 @@ class TROLOLO_Trainer:
                     print("Begin label smoothing")
                     loss_fn = nn.CrossEntropyLoss(label_smoothing=labelsmoothing)
                     notSmoothing = False
-                    lr_sched.const_lr._reset()
-                    lr_sched.const_lr.cooldown_counter=n_batches*2
+                    lr_sched.grace_period(n_batches*2)
                 #acc_event.wait() # Yolo! the accuracy calculations should take no time compared to a backwards pass
                 hard = False
                 if indexes is not None:
@@ -300,7 +317,22 @@ class TROLOLO_Trainer:
             #if indexes is not None:
             #    hard=epoch % 10 == 0 and epoch > (lr_sched.constantLr_epochs + 5)
             #    train_dataloader.set_hard(hard)
-            self.validation_loop(val_dataloader,epoch,val_batch_size)
+            val_loss, val_accuracy, val_accuracy5 = self.validation_loop(val_dataloader,epoch,val_batch_size)
+            if self.writer is not None:
+                self.writer.add_scalars('Losses', {
+                    'train': lossAvg,
+                    'val': val_loss,
+                }, epoch)
+                accs={
+                    'train': acc_sum/i,
+                    'val': val_accuracy,
+                }
+                if self.trololo.num_classes > 50:
+                    accs['val5']=val_accuracy5
+                    accs['train5']=acc5_sum/i
+                self.writer.add_scalars('accuracy',accs, epoch)
+                self.writer.add_scalars("Learning rate",{'lr':lr_sched._last_lr[0]}, epoch)
+                self.writer.close()
 
     def copy_batch_to_preallocated(self,y_batch,y_gpu,onehot_stream,y_gpu_onehot,x_gpu,X_batch):
         with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
@@ -321,7 +353,7 @@ class TROLOLO_Trainer:
                 with torch.cuda.stream(acc_stream):
                     acc_stream.wait_stream(self.default_stream)
                     accuracy = (y_pred.detach().argmax(1) == y).float().mean()
-                    _, top5_preds = torch.topk(y_pred.detach(), k=5, dim=1)
+                    _, top5_preds = torch.topk(y_pred.detach(), k=min(5,self.trololo.num_classes), dim=1)
                     acc5 = (top5_preds == y.unsqueeze(1)).any(dim=1).float().mean()
                 #    acc_event.record()
                 # onehot_event.wait() # Yolo! the one hot calculations should take no time compared to a forward pass
@@ -383,11 +415,11 @@ class TROLOLO_Trainer:
         self.trololo.cuda()
         val_batch_size=1*batch_size
 
-        #train_dataloader = DataLoader(dataset=train_data,worker_init_fn=train_data._worker_init_fn, batch_size=batch_size, shuffle=True, pin_memory=True, prefetch_factor=10, num_workers=15, persistent_workers=True)
+        #train_dataloader = DataLoader(dataset=train_data,worker_init_fn=train_data._worker_init_fn, batch_size=batch_size, shuffle=True, pin_memory=True, prefetch_factor=10, num_workers=self.n_dataloader_threads, persistent_workers=True)
         train_dataloader = DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True, pin_memory=True, prefetch_factor=10, num_workers=8, persistent_workers=True)
         datalength = len(train_dataloader.dataset)
         val_dataloader = DataLoader(dataset=val_data, batch_size=val_batch_size, shuffle=False, pin_memory=True, prefetch_factor=10, num_workers=8, persistent_workers=True)
-        #val_dataloader = DataLoader(dataset=val_data,worker_init_fn=val_data._worker_init_fn, batch_size= val_batch_size, shuffle=False, pin_memory=True, prefetch_factor=10, num_workers=15, persistent_workers=True)
+        #val_dataloader = DataLoader(dataset=val_data,worker_init_fn=val_data._worker_init_fn, batch_size= val_batch_size, shuffle=False, pin_memory=True, prefetch_factor=10, num_workers=self.n_dataloader_threads, persistent_workers=True)
         n_batches =  datalength // batch_size
         scaler = torch.amp.GradScaler()
         optimizer = torch.optim.AdamW(self.trololo.parameters(), lr=lr)
@@ -428,6 +460,28 @@ class TROLOLO_Trainer:
                 lr_sched.step()
             progressBar.close()
             val_loss = self.validation_loop_nocnn(val_dataloader,epoch,val_batch_size)
+
+def show_batch(data,transforms):
+    from torchvision.utils import make_grid
+    import torchvision.transforms.v2 as v2
+    from collections.abc import Iterable
+    if isinstance(data,torch.utils.data.Dataset):
+        dataloader = DataLoader(dataset=data, batch_size=64)
+    else:
+        dataloader=data
+    batch=next(iter(dataloader))[0]
+    if transforms is not None:
+        if not isinstance(transforms, Iterable):
+            transforms=[transforms]
+        for transform in transforms:
+            batch=transform(batch)
+    batch=batch.cpu()
+    nrows=int(math.sqrt(batch.shape[0])*2)
+    imgs=make_grid(v2.ToDtype(dtype=torch.uint8,scale=True)(batch),nrow=nrows)
+    #from PIL import Image
+    imgs=v2.functional.to_pil_image(imgs)
+    imgs.show()
+
 
 def force_pbar_setpostfix(progressBar,**kwargs):
     progressBar.last_print_t = progressBar.last_print_t - progressBar.mininterval

@@ -18,7 +18,7 @@ from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
 
 def MNIST(quantize=True):
     from torchvision.transforms import v2, InterpolationMode
-    disable_compilation(True)
+    disable_compilation(False)
     trololo = TROLOLO(image_size=28,
                       img_channels=1,
                       patch_size=2,
@@ -35,7 +35,7 @@ def MNIST(quantize=True):
                       qkv_rank=0.06,
                       attnproj_rank=0.05,
                       sequence_pyramid=[(2, 4)],
-                      attn_rank_pyramid=[(0, 32),(1, 32), (2, 32)],
+                      attn_rank_pyramid=[(0, 32),(1, 16), (2, 16)],
                       rank_pyramid_begin=2,
                       rank_pyramid_factor=0.81,
                       head_constriction="ONE_CLASS_TOKEN",
@@ -44,7 +44,7 @@ def MNIST(quantize=True):
                       quantize_bits= None if not quantize else 8,
                       activation=nn.Hardswish
                       )
-    trainer = TROLOLO_Trainer(trololo=trololo)
+    trainer = TROLOLO_Trainer(trololo=trololo,experiment_name="MNIST",)
     transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
     val_data = torchvision.datasets.MNIST(root="data/MNIST", download=True, train=False, transform=transform)
     transform = torchvision.transforms.Compose(
@@ -73,8 +73,8 @@ def MNIST(quantize=True):
     )
     train_data = torchvision.datasets.MNIST(root="data/MNIST", download=True, train=True, transform=transform)
     batch_size=64
-    trainer.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=2, batch_size=batch_size)
-    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=300,batch_size=batch_size,transfer=10)
+
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3,lr_mid=2.0e-4,lr_min=5e-6,n_epochs=300,batch_size=batch_size,transfer=0)
 
 if __name__ == "__main__":
     MNIST(quantize=True)

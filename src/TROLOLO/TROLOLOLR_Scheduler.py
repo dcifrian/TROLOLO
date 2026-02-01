@@ -18,14 +18,10 @@ from bisect import bisect_right
 
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-ReduceLROnPlateau2 = type('SomeClass', ReduceLROnPlateau.__bases__, dict(ReduceLROnPlateau.__dict__))
+ReduceLROnPlateau2 = type('ReduceLROnPlateau2', ReduceLROnPlateau.__bases__, dict(ReduceLROnPlateau.__dict__))
 """
-Workaroung to make torch.optim.lr_scheduler.SequentialLR not throw an exception when using ReduceLROnPlateau
+Workaround to make torch.optim.lr_scheduler.SequentialLR not throw an exception when using ReduceLROnPlateau
 """
-class ReduceLROnPlateau3(torch.optim.lr_scheduler.ReduceLROnPlateau):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
 class TROLOLOLR_Scheduler(torch.optim.lr_scheduler.SequentialLR):
     def __init__(self,optimizer,lr_peak,lr_mid,lr_min,transition_steps,constantLr_epochs,n_epochs,n_batches):
@@ -37,7 +33,7 @@ class TROLOLOLR_Scheduler(torch.optim.lr_scheduler.SequentialLR):
         warmup = torch.optim.lr_scheduler.LinearLR(optimizer=optimizer, start_factor=lr_mid / lr_peak, end_factor=1.0, total_iters=transition_steps // 2)
         const_lr = torch.optim.lr_scheduler.LinearLR(optimizer=optimizer, start_factor=1.0, end_factor=1.0, total_iters=constantLr_epochs * n_batches)
         if autoExitConstant:
-            const_lr = ReduceLROnPlateau2(optimizer=optimizer,factor=min(0.75,4 * lr_mid / lr_peak),min_lr=lr_mid , patience=(constantLr_epochs * n_batches)//100, threshold=1e-5)
+            const_lr = ReduceLROnPlateau2(optimizer=optimizer,factor=min(0.75,4 * lr_mid / lr_peak),min_lr=lr_mid , patience=max(n_batches+1,(constantLr_epochs * n_batches)//30), threshold=1e-5)
         rampdown = torch.optim.lr_scheduler.LinearLR(optimizer=optimizer, start_factor=1.0, end_factor=lr_mid / lr_peak, total_iters=transition_steps)
         cos_decay = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=((n_epochs - constantLr_epochs) * n_batches) - (2 * transition_steps), eta_min=lr_min)
         cos_decay.base_lrs = [lr_mid]
@@ -45,15 +41,14 @@ class TROLOLOLR_Scheduler(torch.optim.lr_scheduler.SequentialLR):
         start_const_lr = transition_steps
         start_rampdown = transition_steps + constantLr_epochs * n_batches
         start_cos_decay = 2*transition_steps + constantLr_epochs * n_batches
-        #initial_step_method = startup._initial_step
-        #startup._initial_step = lambda: None
         super().__init__(optimizer=optimizer,
                          schedulers=[startup, warmup, const_lr, rampdown, cos_decay],
                          milestones=[start_warmup,start_const_lr,start_rampdown,start_cos_decay]
                          )
-        #startup._initial_step = initial_step_method
-        #startup._initial_step(metrics=1000.0)
         self._last_lr = startup._last_lr
+        self.lr_peak = lr_peak
+        self.lr_mid = lr_mid
+        self.lr_min = lr_min
         self.startup = startup
         self.warmup = warmup
         self.const_lr = const_lr
@@ -71,6 +66,10 @@ class TROLOLOLR_Scheduler(torch.optim.lr_scheduler.SequentialLR):
         self._step_count = 0
         self.step(**kwargs)
 
+    def grace_period(self,batches):
+        self.const_lr._reset()
+        self.const_lr.cooldown_counter = batches
+
     def step(self,**kwargs):  # type: ignore[override]
         """Perform a step."""
         self.last_epoch += 1
@@ -78,8 +77,13 @@ class TROLOLOLR_Scheduler(torch.optim.lr_scheduler.SequentialLR):
         scheduler = self._schedulers[idx]
         if isinstance(scheduler, ReduceLROnPlateau2):
             scheduler.step(**kwargs)
+            if scheduler.in_cooldown:
+                scheduler.best = scheduler.mode_worse
         else:
             if idx > 0 and self._milestones[idx - 1] == self.last_epoch:
+                if idx == 3:
+                    self.rampdown.base_lrs : list[float] = [ group["initial_lr"] for group in self.optimizer.param_groups ]
+                    self.rampdown.end_factor = self.lr_mid / self.rampdown.base_lrs[0]
                 scheduler.step(0)
             else:
                 scheduler.step()

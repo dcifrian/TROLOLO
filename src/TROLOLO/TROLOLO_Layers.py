@@ -369,13 +369,6 @@ class EncoderSVD(nn.Module):
                                                                     full_dim=embed_dim,
                                                                     seq_len=seq_length_layer,
                                                                     pos_embedding=pos_embedding,concat_shape=(2,2))
-                """layers[f"encoder_pooling_{i}"]=spatial_stitch_2x2(patch_grid_size=patch_grid_size,
-                                                                  n_class_tokens=n_class_tokens,
-                                                                  reduced_dim=reduced_dim,
-                                                                  full_dim=embed_dim,
-                                                                  seq_len=seq_length_layer,
-                                                                  pos_embedding=pos_embedding)
-                """
                 patch_grid_size=int(patch_grid_size // math.sqrt(seqRed))
             print(patch_grid_size)
         self.layers = nn.Sequential(layers)
@@ -473,82 +466,6 @@ class sequence_stitch(nn.Module):
         spatial_grid = spatial_grid.permute(*self.perm).contiguous()
         # Final reshape
         stitched = spatial_grid.view(batch_size, self.new_seq_len, self.concat_n * reduced_dim)
-        return self.pos_embed(stitched)
-
-
-class spatial_stitch_2x2_old(nn.Module):
-
-    def __init__(self, patch_grid_size,n_class_tokens,reduced_dim,full_dim,seq_len,pos_embedding: Callable[..., torch.nn.Module]):
-        super().__init__()
-        self.patch_grid_size=patch_grid_size
-        self.n_class_tokens=n_class_tokens
-        self.pos_embed = pos_embedding(seq_length=seq_len, n_class_tokens=0, x_size=math.sqrt(seq_len), y_size=math.sqrt(seq_len))
-        self.mismatch = reduced_dim * 4 + self.pos_embed.reserved_dims - full_dim
-        if self.mismatch != 0:
-            print(f"The sequence reduction causes a mismatch:{self.mismatch}")
-            print(f"You can avoid mismatches by setting the model dim such that model_dim//seq_red + concat_embedding_dim == 0 ")
-            if self.mismatch >0:
-                print(f"A positive mismatch means that after embedding we have a larger dimension than the model, will solve it by summing the first components.")
-                self.forward = torch.compile(self.forward_folded, fullgraph=True, dynamic=True, options=COMPILE_OPTIONS, disable=COMPILE_DISABLED["state"])
-            elif self.mismatch < 0:
-                print("A negative mismatch means that after stitching the patches we are still lacking dimensions so we will pad them.")
-                self.forward = torch.compile(self.forward_padded, fullgraph=True, dynamic=True, options=COMPILE_OPTIONS, disable=COMPILE_DISABLED["state"])
-        else:
-            self.forward=torch.compile(self.forward,fullgraph=True,dynamic=True,options=COMPILE_OPTIONS, disable=COMPILE_DISABLED["state"])
-
-    def forward(self,x):
-        """
-        x: [batch, patch_grid_size^2, dim/4]
-        Stitch 4 neighboring patches together to get 1/4 sequence length with full dim
-        """
-        spatial_tokens = x[0]
-        class_token = x[1]
-        stitched = self.stitch(spatial_tokens)
-        return torch.cat([class_token, stitched], dim=1)
-
-    def forward_padded(self,x):
-        spatial_tokens = x[0]
-        class_token = x[1]
-        stitched = self.stitch(spatial_tokens)
-        stitched = torch.nn.functional.pad(input=stitched,pad=self.mismatch,value=0.01) # Better than 0, if it is 0 the weights are dead, if it isn't they can act as input biases.
-        return torch.cat([class_token, stitched], dim=1)
-
-    def forward_folded(self,x):
-        spatial_tokens = x[0]
-        class_token = x[1]
-        stitched = self.stitch(spatial_tokens)
-        batch_size, seq_len, _ = stitched.shape
-        mismatch2 = 2*self.mismatch
-        folded_start = stitched[...,:mismatch2].reshape(batch_size,seq_len,self.mismatch,2).sum(dim=-1)
-        stitched = torch.cat([folded_start, stitched[...,mismatch2:]],dim=-1)
-        return torch.cat([class_token, stitched], dim=1)
-
-    def stitch(self,x):
-        """
-        x: [batch, patch_grid_size^2, dim/4]
-        Stitch 4 neighboring patches together to get 1/4 sequence length with full dim
-        """
-        batch_size, seq_len, reduced_dim = x.shape
-        seq_len=seq_len-self.n_class_tokens
-        patch_grid_size = self.patch_grid_size
-        # Reshape to spatial grid
-        # Separate class token and spatial tokens
-
-        spatial_tokens = x
-        spatial_grid = spatial_tokens.view(batch_size, patch_grid_size, patch_grid_size, reduced_dim)
-
-        # Group into 2x2 blocks and concatenate their features
-        new_grid_size = patch_grid_size // 2
-        stitched = spatial_grid.view(
-            batch_size,
-            new_grid_size, 2,  # Split height into blocks
-            new_grid_size, 2,  # Split width into blocks
-            reduced_dim
-        ).permute(0, 1, 3, 2, 4, 5).contiguous().view(
-            batch_size,
-            new_grid_size * new_grid_size,
-            4 * reduced_dim  # Concatenate the 4 neighbors
-        )
         return self.pos_embed(stitched)
 
 class REncoderSVD(nn.Module):
@@ -658,7 +575,7 @@ class LowRankAttention(nn.Module):
         self.attn_dims = []
         if attn_dim is None:
             attn_dim = embed_dim
-        elif attn_dim == "ceilheads" or attn_dim == "floorheads":
+        if attn_dim == "ceilheads" or attn_dim == "floorheads":
             mode = attn_dim
             attn_dim = 0
             for nh in self.num_heads:
@@ -672,6 +589,11 @@ class LowRankAttention(nn.Module):
                 head_dim = attn_dim2 // nh
                 self.head_dim.append(head_dim)
                 self.scale.append(1.0 / math.sqrt(head_dim))
+        elif self.n_head_sizes == 1:
+            self.attn_dims.append(3*attn_dim)
+            head_dim = embed_dim//self.num_heads[1]
+            self.head_dim.append(head_dim)
+            self.scale.append(1.0 / math.sqrt(head_dim))
         self.attn_dim = attn_dim
         effectivedim=0
         for i in range(self.n_head_sizes):
@@ -680,22 +602,25 @@ class LowRankAttention(nn.Module):
         if qkv_rank == 1 or qkv_rank == 1.0:
             self.qkv = nn.Linear(embed_dim, attn_dim*3, bias=qkv_bias)
         else:
-            self.qkv = SVDLinear(embed_dim, attn_dim*3, rank=int(embed_dim * qkv_rank), bias=qkv_bias,bits=quantize_bits)
+            self.qkv = SVDLinear(embed_dim, attn_dim*3, rank=max(1,int(embed_dim * qkv_rank)), bias=qkv_bias,bits=quantize_bits)
         if proj_rank == 1 or proj_rank == 1.0:
             self.proj = nn.Linear(attn_dim, embed_dim, bias=proj_bias)
         else:
-            self.proj = SVDLinear(attn_dim, embed_dim, rank=int(embed_dim * proj_rank), bias=proj_bias,bits=quantize_bits)
+            self.proj = SVDLinear(attn_dim, embed_dim, rank=max(1,int(embed_dim * proj_rank)), bias=proj_bias,bits=quantize_bits)
         # Bottleneck tokens
-        self.streams =[torch.cuda.default_stream()]
+        self.streams =[torch.cuda.default_stream(),torch.cuda.Stream()]
         for i in range(self.n_head_sizes-1):
             self.streams.append(torch.cuda.Stream())
+            self.streams.append(torch.cuda.Stream())
         self.bottleneck_tokens = nn.ParameterList()
+        # TODO: Experiment with dynamic bottlenecks figuring out a way to project down the sequence, maybe by convolution.
+        # It may also be worth having separate ones for q and k even if static
         if n_bottleneck is not None and n_bottleneck >0:
             for i in range(self.n_head_sizes):
                 self.bottleneck_tokens.append(nn.Parameter(torch.randn(self.num_heads[i], n_bottleneck, self.head_dim[i]) * self.scale[i]))
             self.forward = torch.compile(self.forward, fullgraph=True, dynamic=True, options=COMPILE_OPTIONS, disable=COMPILE_DISABLED["state"])
         else:
-            self.forward = torch.compile(self.forward_quadratic_attention_multiple, fullgraph=True, dynamic=True, options=COMPILE_OPTIONS, disable=COMPILE_DISABLED["state"])
+            self.forward = torch.compile(self.forward_quadratic_attention, fullgraph=True, dynamic=True, options=COMPILE_OPTIONS, disable=COMPILE_DISABLED["state"])
 
     def reshapeHeads(self,x,B,N,num_heads,head_dim):
         qkv = x.reshape(B, N, 3, num_heads, head_dim).permute(2, 0, 3, 1, 4)
@@ -704,14 +629,20 @@ class LowRankAttention(nn.Module):
     def forward(self, x):
         B, N, _ = x.shape
         #C = self.proj.in_features
+        bottlenecks_list = []
+        for i in range(self.n_head_sizes):
+            with torch.cuda.stream(self.streams[i+self.n_head_sizes]):
+                bottlenecks_list.append(self.bottleneck_tokens[i].unsqueeze(0).expand(B, -1, -1, -1))  # Get bottlenecks [n_heads, n_bottleneck, d_k] -> [B, n_heads, n_bottleneck, d_k]
         qkv0 = self.qkv(x) # Single projection for Q, K, V
         qkv0 = torch.split(tensor= qkv0, split_size_or_sections=self.attn_dims, dim=-1)
         x_list = []
         for i in range(self.n_head_sizes):
-            with torch.cuda.stream(self.streams[i]):
+            stream = self.streams[i]
+            with torch.cuda.stream(stream):
                 qkv = self.reshapeHeads(qkv0[i], B, N, num_heads=self.num_heads[i], head_dim=self.head_dim[i])
                 q, k, v = qkv.unbind(0)
-                bottlenecks = self.bottleneck_tokens[i].unsqueeze(0).expand(B, -1, -1, -1) # Get bottlenecks [n_heads, n_bottleneck, d_k] -> [B, n_heads, n_bottleneck, d_k]
+                stream.wait_stream(self.streams[i + self.n_head_sizes]) # Waiting for the bottleneck streams
+                bottlenecks=bottlenecks_list[i]
                 global_V = nn.functional.scaled_dot_product_attention(
                     bottlenecks,  # [B, heads, n_bottleneck, d_k]
                     k,  # [B, heads, N, d_k]
@@ -733,20 +664,6 @@ class LowRankAttention(nn.Module):
         return self.proj(out)
 
     def forward_quadratic_attention(self, x):
-        B, N, _ = x.shape
-        C = self.proj.in_features
-        # Single projection for Q, K, V
-        qkv = self.qkv(x) # Single projection for Q, K, V
-        qkv = self.reshapeHeads(qkv,B,N,num_heads=self.num_heads[0],head_dim=self.head_dim[0])
-        q, k, v = qkv.unbind(0)
-        x = torch.nn.functional.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.attn_drop.p if self.training else 0.,
-        )
-        x = x.transpose(1, 2).reshape(B, N, C)
-        return self.proj(x)
-
-    def forward_quadratic_attention_multiple(self, x):
         B, N, _ = x.shape
         #C = self.proj.in_features
         # Single projection for Q, K, V
