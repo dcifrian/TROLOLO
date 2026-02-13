@@ -50,7 +50,7 @@ def MNIST(quantize=True):
         [torchvision.transforms.ToTensor(),
          v2.ToDtype(torch.uint8, scale=True),
          v2.RandomChoice([
-             v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
+             v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),
              v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
          ]),
          v2.ColorJitter(brightness=0.12, contrast=0.18),

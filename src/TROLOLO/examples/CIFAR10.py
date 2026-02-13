@@ -56,8 +56,8 @@ def CIFAR10(quantize=True):
          v2.RandomVerticalFlip(),
          v2.RandomHorizontalFlip(),
          v2.RandomChoice([
-             v2.RandomAdjustSharpness(sharpness_factor=0.8, p=0.15),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-             v2.RandomAdjustSharpness(sharpness_factor=1.2, p=0.15)
+             v2.RandomAdjustSharpness(sharpness_factor=0.8, p=0.05),
+             v2.RandomAdjustSharpness(sharpness_factor=1.2, p=0.05)
          ]),
          v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.5),
          v2.RandomResizedCrop(size=(32,32), scale=(0.5,1.0),antialias=False),

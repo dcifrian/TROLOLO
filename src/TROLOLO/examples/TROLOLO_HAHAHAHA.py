@@ -59,8 +59,8 @@ def TROLOLO_Hahahahaha(quantize=True):
         v2.ToDtype(torch.uint8, scale=True),
         v2.RandomHorizontalFlip(),
         v2.RandomChoice([
-            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.1),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-            v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.1)
+            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),
+            v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
         ]),
         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
         v2.AugMix(severity=2),
@@ -75,7 +75,7 @@ def TROLOLO_Hahahahaha(quantize=True):
             v2.RandomApply(torch.nn.ModuleList([
              v2.RandomAffine(degrees=0, scale=(0.95, 1.05), interpolation=InterpolationMode.BILINEAR),
             ]), p=0.25),
-            v2.RandomPerspective(distortion_scale=0.04, p=0.75),
+            #v2.RandomPerspective(distortion_scale=0.04, p=0.75),
             v2.ElasticTransform(alpha=50, sigma=5),
         ]),
         v2.CenterCrop(size=(64, 64)),

@@ -57,8 +57,8 @@ def Eurosat(quantize=False):
         torchvision.transforms.ToTensor(),
         v2.RandomHorizontalFlip(),
         v2.RandomChoice([
-            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.1),
-            v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.1)
+            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),
+            v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
         ]),
         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
         v2.AugMix(severity=3),
