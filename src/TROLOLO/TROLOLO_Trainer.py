@@ -14,9 +14,10 @@ class TROLOLO_Trainer:
     def __init__(self,trololo:TROLOLO|RETROLOLO,experiment_name=None):
         self.trololo = trololo
         logical_cores = multiprocessing.cpu_count()
-        self.n_dataloader_threads= max(1, (logical_cores // 2) - 1)
+        self.n_dataloader_threads= max(1, (logical_cores // 1) - 1)
         self.best_acc = 0
         self.best_loss = 10000.0
+        self.autocast_dtype = torch.bfloat16
         self.acc_stream = torch.cuda.Stream(priority=1)
         self.acc_event = torch.cuda.Event()
         self.onehot_stream = torch.cuda.Stream(priority=1)
@@ -71,7 +72,7 @@ class TROLOLO_Trainer:
                 re = torchvision.transforms.RandomErasing.get_params(X_batch, scale=((cut_size/ self.trololo.image_size) ** 2, (cut_size/self.trololo.image_size) ** 2), ratio=(1.0, 1.0), value=[0])
                 y_Batch = v2.functional.crop(X_batch,re[0],re[1],re[2],re[3]).cuda().reshape(curr_bs, -1)
                 X_batch = v2.functional.erase(X_batch,re[0],re[1],re[2],re[3],re[4])
-                with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+                with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype):
                     x=x_gpu[:curr_bs,:,:,:].copy_(X_batch, non_blocking=True)[:curr_bs,:,:,:]
                     y_pred = self.trololo(x)
                     loss = loss_fn(y_pred, y_Batch)
@@ -109,7 +110,7 @@ class TROLOLO_Trainer:
         accuracies = []
         accuracies5 = []
         losses = []
-        with (torch.inference_mode(),torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16)):
+        with (torch.inference_mode(),torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype)):
             x_gpu = self.trololo.preallocate_inputs(batch_size)
             y_gpu = self.trololo.preallocate_class_indices(batch_size)
             y_gpu_onehot = self.trololo.preallocate_targets(batch_size)
@@ -140,7 +141,7 @@ class TROLOLO_Trainer:
         return loss,accuracy,accuracy5
 
     def validation_batch(self, x, y, y_onehot , acc_stream, loss_fn):
-        with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+        with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype):
             y_pred = self.trololo(x)
             # torch.cuda.synchronize()  # Force everything to finish
             with torch.cuda.stream(acc_stream):
@@ -335,7 +336,7 @@ class TROLOLO_Trainer:
                 self.writer.close()
 
     def copy_batch_to_preallocated(self,y_batch,y_gpu,onehot_stream,y_gpu_onehot,x_gpu,X_batch):
-        with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+        with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype):
             curr_bs = y_batch.shape[0]
             y = self.trololo.copy_to_preallocated_class_indices(y_batch, y_gpu, curr_bs)
             with torch.cuda.stream(onehot_stream):
@@ -347,7 +348,7 @@ class TROLOLO_Trainer:
 
     def train_batch(self, x, y, y_onehot, acc_stream, loss_fn, loss_fn_nosmooth, optimizer, scaler):
         acc5=0
-        with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+        with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype):
             y_pred = self.trololo(x)
             with torch.inference_mode():
                 with torch.cuda.stream(acc_stream):
@@ -385,7 +386,7 @@ class TROLOLO_Trainer:
         x_gpu = self.trololo.preallocate_inputs(batch_size)
         y_gpu = self.trololo.preallocate_targets(batch_size)
         losses=[]
-        with (torch.inference_mode(),torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16)):
+        with (torch.inference_mode(),torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype)):
             progressBar = tqdm(total=datalength, desc=f"Val epoch {epoch}: ", unit="seq", colour="green", position=0, leave=True)
             for dat in dataloader:
                 data=dat["features"]
@@ -436,14 +437,17 @@ class TROLOLO_Trainer:
         if transfer:
             self.transfer_loop(lr=lr_mid/20,epochs=transfer,train_dataloader=train_dataloader,batch_size=batch_size)
         self.best_acc=1000000.0
+        loss_avg = 1000000.0
         for epoch in range(n_epochs):
+            loss_sum = 0
+            i=0
             self.trololo.train()
             progressBar = tqdm(total=datalength, desc=f"Training epoch {epoch}/{n_epochs}: ", unit="seq", colour="green", position=0, leave=True)
             for dat in train_dataloader:
                 data=dat["features"]
                 X_batch = data
                 y_batch = dat["target"]
-                with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=torch.bfloat16):
+                with torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype):
                     curr_bs = y_batch.shape[0]
                     y = y_gpu[:curr_bs].copy_(y_batch, non_blocking=False)
                     x_gpu[:curr_bs, :X_batch.shape[2], :].copy_(X_batch.permute(0, 2, 1), non_blocking=True)
@@ -455,13 +459,16 @@ class TROLOLO_Trainer:
                 scaler.step(optimizer)
                 scaler.update()
                 loss=loss.item()
+                loss_sum+=loss
+                i+=1
                 progressBar.set_postfix(loss=loss, lr=lr_sched._last_lr[0])
                 progressBar.update(len(y_batch))
-                lr_sched.step()
+                lr_sched.step(metrics=loss_avg)
+            loss_avg = loss_sum / i
             progressBar.close()
             val_loss = self.validation_loop_nocnn(val_dataloader,epoch,val_batch_size)
 
-def show_batch(data,transforms):
+def show_batch(data,transforms=None):
     from torchvision.utils import make_grid
     import torchvision.transforms.v2 as v2
     from collections.abc import Iterable

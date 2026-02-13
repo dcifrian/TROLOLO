@@ -18,9 +18,6 @@ import math
 from collections import OrderedDict
 from functools import partial
 from typing import Callable
-
-from triton.language import dtype
-
 from TROLOLO.SVD_layer import SVDLinear
 
 torch._dynamo.config.recompile_limit=640
@@ -107,7 +104,7 @@ class MLPBlockSVD(torch.nn.Sequential):
         hidden_channels=[mlp_dim, in_dim]
         activation_layer=activation
         for embed_dim in hidden_channels[:-1]:
-            r=int(rank*min(in_dim,embed_dim))
+            r=max(1,int(rank*min(in_dim,embed_dim)))
             if rank == 1 or rank == 1.0:
                 layers.append(nn.Linear(in_dim, embed_dim, bias=True))
             else:
@@ -116,7 +113,7 @@ class MLPBlockSVD(torch.nn.Sequential):
             layers.append(activation_layer(**params))
             layers.append(torch.nn.Dropout(dropout, **params))
             in_dim = embed_dim
-        r = int(rank * min(in_dim, hidden_channels[-1]))
+        r = max(1,int(rank * min(in_dim, hidden_channels[-1])))
         if out_dim is None:
             out_dim=hidden_channels[-1]
         if rank == 1  or rank == 1.0:
@@ -609,6 +606,7 @@ class LowRankAttention(nn.Module):
             self.proj = SVDLinear(attn_dim, embed_dim, rank=max(1,int(embed_dim * proj_rank)), bias=proj_bias,bits=quantize_bits)
         # Bottleneck tokens
         self.streams =[torch.cuda.default_stream(),torch.cuda.Stream()]
+        #self.streams = [torch.cuda.Stream(), torch.cuda.Stream()]
         for i in range(self.n_head_sizes-1):
             self.streams.append(torch.cuda.Stream())
             self.streams.append(torch.cuda.Stream())
@@ -658,7 +656,8 @@ class LowRankAttention(nn.Module):
                 out2 = out2.transpose(1, 2) # Transpose to [B, N, num_heads[i], head_dim[i]]
                 out2 = out2.reshape(B, N, -1) # Flatten heads: [B, N, num_heads[i] * head_dim[i]]
                 x_list.append(out2)
-        torch.cuda.synchronize()
+        for stream in self.streams:
+            stream.synchronize()
         out = torch.cat(x_list, dim=-1)  # [B, N, attention_dim]
         #out = out.transpose(1, 2).reshape(B, N, C)
         return self.proj(out)
@@ -684,6 +683,7 @@ class LowRankAttention(nn.Module):
                 x2 = x2.reshape(B, N, -1) # Flatten heads: [B, N, num_heads[i] * head_dim[i]]
                 x_list.append(x2)
         #print(x_list[0].shape,x_list[1].shape)
-        torch.cuda.synchronize()
+        for stream in self.streams:
+            stream.synchronize()
         x = torch.cat(x_list, dim=-1)  # [B, N, attention_dim]
         return self.proj(x)

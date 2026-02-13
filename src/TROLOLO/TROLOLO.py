@@ -249,27 +249,27 @@ class TROLOLO(nn.Module):
         x = self.heads(x)
         return x
 
-    def preallocate_inputs(self,batch_size:int):
+    def preallocate_inputs(self,batch_size:int,dtype:torch.dtype = torch.bfloat16):
         """
         Preallocates the model inputs in the gpu so they can be reused avoiding the allocation overhead and the memory fragmentation caused by repeated deallocations.
         """
         if self.image_size is not None and self.image_size>0:
-            x_gpu = torch.zeros([batch_size, self.conv_proj.in_channels, self.image_size, self.image_size], dtype=torch.bfloat16, device="cuda")
+            x_gpu = torch.zeros([batch_size, self.conv_proj.in_channels, self.image_size, self.image_size], dtype=dtype, device="cuda")
         else:
-            x_gpu = torch.zeros([batch_size, self.embed_dim - self.reserved_dims, self.seq_length - self.n_class_tokens], dtype=torch.bfloat16, device="cuda")
+            x_gpu = torch.zeros([batch_size, self.embed_dim - self.reserved_dims, self.seq_length - self.n_class_tokens], dtype=dtype, device="cuda")
         return x_gpu
 
-    def preallocate_targets(self, batch_size: int):
+    def preallocate_targets(self, batch_size: int,dtype:torch.dtype = torch.bfloat16):
         """
         Preallocates the model targets in the gpu so they can be reused avoiding the allocation overhead and the memory fragmentation caused by repeated deallocations.
         """
-        return  torch.zeros([batch_size,self.num_classes], dtype=torch.bfloat16, device="cuda")
+        return  torch.zeros([batch_size,self.num_classes], dtype=dtype, device="cuda")
 
-    def preallocate_class_indices(self, batch_size: int):
+    def preallocate_class_indices(self, batch_size: int,dtype:torch.dtype = torch.long):
         """
         Preallocates the target class indices in the gpu so they can be reused avoiding the allocation overhead and the memory fragmentation caused by repeated deallocations.
         """
-        return torch.zeros([batch_size], dtype=torch.long, device="cuda")
+        return torch.zeros([batch_size], dtype=dtype, device="cuda")
 
     def copy_to_preallocated_inputs(self, x: torch.Tensor,x_gpu: torch.Tensor,batch_size: int):
         """

@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import torchvision
-
+from torchvision.transforms import v2, InterpolationMode
 from TROLOLO.TROLOLO import *
 from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
 
 def MNIST(quantize=True):
-    from torchvision.transforms import v2, InterpolationMode
     disable_compilation(False)
     trololo = TROLOLO(image_size=28,
                       img_channels=1,

@@ -59,8 +59,8 @@ def TROLOLO_Hahahahaha(quantize=True):
         v2.ToDtype(torch.uint8, scale=True),
         v2.RandomHorizontalFlip(),
         v2.RandomChoice([
-            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
-            v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
+            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.1),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
+            v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.1)
         ]),
         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
         v2.AugMix(severity=2),
@@ -73,8 +73,9 @@ def TROLOLO_Hahahahaha(quantize=True):
              v2.RandomAffine(degrees=0, translate=(0.25, 0.25), interpolation=InterpolationMode.NEAREST),
             ]), p=0.75),
             v2.RandomApply(torch.nn.ModuleList([
-             v2.RandomAffine(degrees=0, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
+             v2.RandomAffine(degrees=0, scale=(0.95, 1.05), interpolation=InterpolationMode.BILINEAR),
             ]), p=0.25),
+            v2.RandomPerspective(distortion_scale=0.04, p=0.75),
             v2.ElasticTransform(alpha=50, sigma=5),
         ]),
         v2.CenterCrop(size=(64, 64)),
@@ -153,11 +154,11 @@ def TROLOLO_Hahahahaha_DALI(quantize=True):
     transform_gpu = torchvision.transforms.Compose([
         v2.RandomHorizontalFlip(),
         v2.RandomChoice([
-            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed
+            v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),
             v2.RandomAdjustSharpness(sharpness_factor=1.15, p=0.05)
         ]),
         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
-        v2.AugMix(severity=1,alpha=0.8),
+        v2.AugMix(severity=1,alpha=0.6),
         v2.Lambda(lambda x: nn.functional.pad(x, (63, 63, 63, 63), mode='circular')),
         v2.RandomAffine(degrees=180, interpolation=InterpolationMode.BILINEAR),
         v2.RandomChoice([
@@ -165,9 +166,10 @@ def TROLOLO_Hahahahaha_DALI(quantize=True):
              v2.RandomAffine(degrees=0, translate=(0.25, 0.25), interpolation=InterpolationMode.NEAREST),
             ]), p=0.75),
             v2.RandomApply(torch.nn.ModuleList([
-             v2.RandomAffine(degrees=0, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
+             v2.RandomAffine(degrees=0, scale=(0.95, 1.05), interpolation=InterpolationMode.BILINEAR),
             ]), p=0.25),
-            v2.ElasticTransform(alpha=100, sigma=6),
+            v2.RandomPerspective(distortion_scale=0.04, p=0.75),
+            v2.ElasticTransform(alpha=50, sigma=5),
         ]),
         v2.CenterCrop(size=(64, 64)),
         v2.RandomErasing(p=0.8, scale=(0.0, 0.05), value='random'),
@@ -179,6 +181,6 @@ def TROLOLO_Hahahahaha_DALI(quantize=True):
     trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3*lr_scaling,lr_mid=2.0e-4*lr_scaling,lr_min=1e-6*lr_scaling,n_epochs=2000,batch_size=batch_size,transfer=0,transforms=transform_gpu)
 
 if __name__ == "__main__":
-    #TROLOLO_Hahahahaha(quantize=True)
-    TROLOLO_Hahahahaha_DALI(quantize=True)
+    TROLOLO_Hahahahaha(quantize=True)
+    #TROLOLO_Hahahahaha_DALI(quantize=True)
 

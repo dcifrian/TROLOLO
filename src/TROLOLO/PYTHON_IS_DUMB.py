@@ -23,7 +23,7 @@ COMPILE_OPTIONS = {"triton.cudagraphs": True,
                    "shape_padding": True,
                    'coordinate_descent_tuning': True,
                    "max_autotune": True,
-                   "b2b_gemm_pass": True,
+                   #"b2b_gemm_pass": True, # Broken in pytorch 2.9.1
                    "aggressive_fusion": True,
                    "max_autotune_gemm": True,
                    "memory_planning": False,  # Does reduce VRAM a bit, but also reduces speed a bit
@@ -37,13 +37,13 @@ COMPILE_OPTIONS = {"triton.cudagraphs": True,
                    "permute_fusion": False, # Issues with quantization
                    "force_pointwise_cat": True,
                    "max_fusion_size": 1024,
-                   "max_pointwise_cat_inputs": 8,  # Maybe a tiny bit slower?
+                   "max_pointwise_cat_inputs": 8,
                    "triton.dense_indexing": True,
                    "size_asserts": False,  # No difference, might be a footgun.
                    "scalar_asserts": False,  # No difference, might be a footgun.
                    "triton.spill_threshold": 32,
                    "triton.min_split_scan_rblock": 16,
-                   #"combo_kernels": True,
+                   #"combo_kernels": True, # Breaks at least on pytorch 2.7 for short sequences
                    #"combo_kernels_autotune": 40,
                    "force_fuse_int_mm_with_mul": True
                    }

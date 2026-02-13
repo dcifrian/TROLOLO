@@ -82,8 +82,10 @@ class TROLOLOLR_Scheduler(torch.optim.lr_scheduler.SequentialLR):
         else:
             if idx > 0 and self._milestones[idx - 1] == self.last_epoch:
                 if idx == 3:
-                    self.rampdown.base_lrs : list[float] = [ group["initial_lr"] for group in self.optimizer.param_groups ]
-                    self.rampdown.end_factor = self.lr_mid / self.rampdown.base_lrs[0]
+                    # Fix for the LR spike that used to happen when the constant LR phase didn't stay constant until the end
+                    self.rampdown.start_factor = self._last_lr[0] / self.rampdown.base_lrs [0]
+                    self.rampdown.end_factor = self.lr_mid / self._last_lr[0]
+                    self.rampdown.base_lrs  = self._last_lr # Seems to have no effect, changing the start factor is what really fixes it because LinearLR scheduller looks at the initial lr of the optimizer
                 scheduler.step(0)
             else:
                 scheduler.step()
@@ -98,8 +100,10 @@ class TROLOLOLR_Scheduler(torch.optim.lr_scheduler.SequentialLR):
         transition_batches = transition_samples // batch_size
         return cls(optimizer,lr_peak,lr_mid,lr_min,transition_batches,constantLr_epochs,n_epochs,n_batches)
 
-    @ classmethod
-    def fullauto(cls,optimizer,n_epochs,n_batches,batch_size,num_classes,model,training_loop):
+    """
+    TODO: Implement methods to automatically determine the lrs.
+    @ classmethod   
+    def fullauto(cls,optimizer,n_epochs,n_batches,batch_size,num_classes,model,training_loop):        
         lr_peak, lr_mid, lr_min = cls.searchLrs()
         return cls.semiauto(optimizer, lr_peak, lr_mid, lr_min, n_epochs, n_batches, batch_size, num_classes)
 
@@ -110,6 +114,7 @@ class TROLOLOLR_Scheduler(torch.optim.lr_scheduler.SequentialLR):
         lr_mid=1e-4
         lr_min=1e-5
         return lr_peak, lr_mid, lr_min
+    """
 
     @staticmethod
     def lr_scale(batch_size,dims,num_layers):
