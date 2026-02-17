@@ -55,11 +55,11 @@ def Imagenet():
         one_hot=False
     )
     #train_data = torchvision.datasets.ImageNet(root="data/Imagenet",split="train",transform=transform)
-    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor(), v2.Resize([256]), v2.CenterCrop(224)])
+    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor(), v2.ToDtype(trainer.input_dtype), v2.Resize([256]), v2.CenterCrop(224)])
     val_data = torchvision.datasets.ImageNet(root="data/Imagenet",split="val",transform=transform)
 
     transform_gpu = torchvision.transforms.Compose([
-        #v2.ToDtype(torch.uint8, scale=True),
+        v2.ToDtype(trainer.input_dtype),
         v2.RandomHorizontalFlip(),
         v2.RandomChoice([
             v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),  # Not sure it helps, experiment more, not sure if sharpness_factor varies or is fixed

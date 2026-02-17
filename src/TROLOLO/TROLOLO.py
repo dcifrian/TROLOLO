@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import pathlib
 import time
 
 import torch
@@ -295,7 +296,27 @@ class TROLOLO(nn.Module):
         """
         return y_gpu_onehot[:batch_size, :].copy_(torch.nn.functional.one_hot(y, self.num_classes).float(), non_blocking=True)[:batch_size, :]
 
-
+    def classify(self,inputs):
+        import torchvision
+        if not isinstance(inputs,torch.Tensor):
+            tensors = []
+            if not isinstance(inputs,list):
+                inputs = [inputs]
+            for input in inputs:
+                if isinstance(input,str) or isinstance(input,pathlib.Path):
+                    tensors.append(torchvision.io.decode_image(input))
+                elif isinstance(input,torch.Tensor):
+                    tensors.append(input)
+            inputs=torch.stack(tensors,dim=0)
+        self.eval()
+        dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        with (torch.inference_mode(), torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=dtype)):
+            y=self(inputs)
+            y=y.detach()
+            cls=y.argmax(1)
+            y=y.cpu()
+            cls=cls.cpu()
+        return cls,y
 
 class RETROLOLO(nn.Module):
     def __init__(

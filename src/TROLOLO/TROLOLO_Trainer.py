@@ -17,7 +17,9 @@ class TROLOLO_Trainer:
         self.n_dataloader_threads= max(1, (logical_cores // 1) - 1)
         self.best_acc = 0
         self.best_loss = 10000.0
-        self.autocast_dtype = torch.bfloat16
+        self.autocast_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        self.input_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        self.output_dtype =torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         self.acc_stream = torch.cuda.Stream(priority=1)
         self.acc_event = torch.cuda.Event()
         self.onehot_stream = torch.cuda.Stream(priority=1)
@@ -58,7 +60,7 @@ class TROLOLO_Trainer:
         print("constant epochs: ",lr_sched.constantLr_epochs)
         print("transition samples: ",lr_sched.transition_steps*batch_size)
         loss_fn = nn.MSELoss()
-        x_gpu = torch.zeros([batch_size,self.trololo.conv_proj.in_channels,self.trololo.image_size,self.trololo.image_size], dtype=torch.float16, device="cuda")
+        x_gpu = torch.zeros([batch_size,self.trololo.conv_proj.in_channels,self.trololo.image_size,self.trololo.image_size], dtype=self.input_dtype, device="cuda")
         for epoch in range(n_epochs):
             self.trololo.train()
             progressBar = tqdm(total=datalength, desc=f"Pre Training epoch {epoch}/{n_epochs}: ", unit="images", colour="green", position=0, leave=True)
@@ -111,9 +113,9 @@ class TROLOLO_Trainer:
         accuracies5 = []
         losses = []
         with (torch.inference_mode(),torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype)):
-            x_gpu = self.trololo.preallocate_inputs(batch_size)
+            x_gpu = self.trololo.preallocate_inputs(batch_size,dtype=self.input_dtype)
             y_gpu = self.trololo.preallocate_class_indices(batch_size)
-            y_gpu_onehot = self.trololo.preallocate_targets(batch_size)
+            y_gpu_onehot = self.trololo.preallocate_targets(batch_size, dtype=self.output_dtype)
             progressBar = tqdm(total=datalength, desc=f"Val epoch {epoch}: ", unit="images", colour="green", position=0, leave=True)
             for data in dataloader:
                 X_batch=data[0]
@@ -163,9 +165,9 @@ class TROLOLO_Trainer:
         optimizer = torch.optim.AdamW(self.trololo.parameters(), lr=lr)
         loss_fn = nn.CrossEntropyLoss()
         loss_fn_nosmooth = nn.CrossEntropyLoss(reduction="none") # not really needed in this loop but required to reuse the batch training method
-        x_gpu = self.trololo.preallocate_inputs(batch_size)
+        x_gpu = self.trololo.preallocate_inputs(batch_size,dtype=self.input_dtype)
         y_gpu = self.trololo.preallocate_class_indices(batch_size)
-        y_gpu_onehot = self.trololo.preallocate_targets(batch_size)
+        y_gpu_onehot = self.trololo.preallocate_targets(batch_size,dtype=self.output_dtype)
         loss_sum = 0
         i = 0
         stuck = 1000000
@@ -261,9 +263,9 @@ class TROLOLO_Trainer:
         print("constant epochs: ",lr_sched.constantLr_epochs)
         print("transition samples: ",lr_sched.transition_steps*batch_size)
         loss_fn = nn.CrossEntropyLoss()
-        x_gpu = self.trololo.preallocate_inputs(batch_size)
+        x_gpu = self.trololo.preallocate_inputs(batch_size, dtype=self.input_dtype)
         y_gpu = self.trololo.preallocate_class_indices(batch_size)
-        y_gpu_onehot = self.trololo.preallocate_targets(batch_size)
+        y_gpu_onehot = self.trololo.preallocate_targets(batch_size, dtype=self.output_dtype)
         lossAvg=1000.0
         for epoch in range(n_epochs):
             loss_sum=0
@@ -383,8 +385,8 @@ class TROLOLO_Trainer:
         #else:
         #    datalength = dataloader.len
         loss_fn = nn.MSELoss()
-        x_gpu = self.trololo.preallocate_inputs(batch_size)
-        y_gpu = self.trololo.preallocate_targets(batch_size)
+        x_gpu = self.trololo.preallocate_inputs(batch_size, dtype=self.input_dtype)
+        y_gpu = self.trololo.preallocate_targets(batch_size, dtype=self.output_dtype)
         losses=[]
         with (torch.inference_mode(),torch.autocast(device_type='cuda', enabled=True, cache_enabled=True, dtype=self.autocast_dtype)):
             progressBar = tqdm(total=datalength, desc=f"Val epoch {epoch}: ", unit="seq", colour="green", position=0, leave=True)
@@ -432,8 +434,8 @@ class TROLOLO_Trainer:
         print("constant epochs: ",lr_sched.constantLr_epochs)
         print("transition samples: ",lr_sched.transition_steps*batch_size)
         loss_fn = nn.MSELoss()
-        x_gpu = self.trololo.preallocate_inputs(batch_size)
-        y_gpu = self.trololo.preallocate_targets(batch_size)
+        x_gpu = self.trololo.preallocate_inputs(batch_size, self.input_dtype)
+        y_gpu = self.trololo.preallocate_targets(batch_size, self.output_dtype)
         if transfer:
             self.transfer_loop(lr=lr_mid/20,epochs=transfer,train_dataloader=train_dataloader,batch_size=batch_size)
         self.best_acc=1000000.0
@@ -484,8 +486,13 @@ def show_batch(data,transforms=None):
             batch=transform(batch)
     batch=batch.cpu()
     nrows=int(math.sqrt(batch.shape[0])*2)
-    imgs=make_grid(v2.ToDtype(dtype=torch.uint8,scale=True)(batch),nrow=nrows)
-    #from PIL import Image
+    if batch.dtype != torch.uint8:
+        print(f"Data in {batch.dtype}, converting to uint8 for visualization.")
+        scale = True
+        if batch.max()>2.0: # It is outside of usual normalization ranges like 0..1 or -1..1 so likely unormalized data in 0..255
+            scale=False
+        batch = v2.ToDtype(dtype=torch.uint8,scale=scale)(batch)
+    imgs=make_grid(batch,nrow=nrows)
     imgs=v2.functional.to_pil_image(imgs)
     imgs.show()
 

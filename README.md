@@ -2,7 +2,7 @@
 
 **Transformer for Rapid Optimized Learning with Overlapping Lightweight Operations**
 
-TROLOLO is a transformer architecture that achieves competitive accuracy with dramatically fewer parameters through principled low-rank factorization of all linear layers and linear-complexity attention. A 96KB model matches ResNet-50 on EuroSAT; a similarly compact model reaches 99.64% on MNIST.
+TROLOLO is a transformer architecture that achieves competitive accuracy with dramatically fewer parameters through principled low-rank factorization of all linear layers and linear-complexity attention. A 96KB model matches ResNet-50 on EuroSAT; a similarly compact model reaches 99.652% on MNIST.
 
 This is not a distilled or pruned model—it trains from scratch. The low-rank structure doesn't limit the optimization landscape; it exploits the inherent low-rank nature of learned weight matrices while allowing the optimizer to explore a space equivalent to much larger networks.
 
@@ -69,6 +69,14 @@ After:   64 tokens × 192 dims (4 patches stitched, dims preserved via reduced M
 
 This is nearly free in both parameters and compute—the previous layer's MLP simply outputs to a smaller dimension, and spatial neighbors are concatenated. Class tokens bypass this reduction through a dedicated skip path.
 
+### Learnable skip connections
+
+Skips are vital for deep neural network trainability by preventing the vanishing gradient of the layers that are far from the output.
+But using skips forces the network to learn deltas and in some sense to have inputs and the different layers fight each other.
+As the vanishing gradient is only a problem when using non-linear functions, adding a learnable scale parameter to the skip connection doesn't impede the gradient flow and allows the network to learn how much the skip should be contributing for each layer and at each moment during training.
+It makes a small difference but costs very little parameters and compute 
+
+
 ## Installation
 
 ### From source (editable install, recommended for development)
@@ -105,7 +113,7 @@ pip install nvidia-dali-cuda120  # adjust for your CUDA version
 
 ### PyTorch Version Note
 
-**torch.compile is currently broken in PyTorch 2.10.0 for this project.** If maximum performance is desired, PyTorch 2.9.1 is recommended. Alternatively, disable compilation (see [Compilation](#compilation) section).
+**torch.compile is currently broken in PyTorch 2.10.0 for this project and compilation is automatically disabled for it.** If maximum performance is desired, PyTorch 2.7 or 2.7.1  use the most aggresive compilation flags but the difference is minor when compared agains 2.9.1. To change the compilation behavior (see [Compilation](#compilation) section).
 
 ## Quick Start
 
@@ -122,39 +130,41 @@ from TROLOLO.TROLOLO_Trainer import TROLOLO_Trainer
 # Optional: disable compilation for faster startup during experimentation
 # disable_compilation(True)
 
-# Define model - this tiny config works well without augmentation
-model = TROLOLO(
-    image_size=28,
-    img_channels=1,
-    patch_size=2,
-    kernel_size=8,
-    group_conv=False,
-    num_layers=4,
-    num_heads=12,
-    embed_dim=72,
-    attention_dim="ceilheads",
-    mlp_dim=72,
-    n_class_tokens=1,
-    num_classes=10,
-    mlp_rank=0.07,
-    qkv_rank=0.14,
-    attnproj_rank=0.07,
-    sequence_pyramid=[],
-    attn_rank_pyramid=[(0, 10), (1, 10), (2, 8), (3, 4)],
-    rank_pyramid_begin=2,
-    rank_pyramid_factor=1,
-    head_constriction="ONE_CLASS_TOKEN",
-    dropout=0.07,
-    attention_dropout=0.01,
-    quantize_bits=8,
-    activation=nn.Hardswish,
-)
+# Define model - this tiny 24k parameters config works well without augmentation
+trololo = TROLOLO(image_size=28,
+                  img_channels=1,
+                  patch_size=2,
+                  kernel_size=8,
+                  group_conv=False,
+                  num_layers=4,
+                  num_heads=12,
+                  embed_dim=72,
+                  attention_dim="ceilheads",
+                  mlp_dim=72,
+                  n_class_tokens=1,
+                  num_classes=10,
+                  mlp_rank=0.08,
+                  qkv_rank=0.14,
+                  attnproj_rank=0.07,
+                  sequence_pyramid=[],
+                  attn_rank_pyramid=[(0, 16),(1, 12), (2,8 ),(3,8)],
+                  rank_pyramid_begin=2,
+                  rank_pyramid_factor=1,
+                  head_constriction="ONE_CLASS_TOKEN",
+                  dropout=0.09,
+                  attention_dropout=0.01,
+                  quantize_bits=8,
+                  activation=nn.Hardswish
+                  )
 
 # Create trainer
-trainer = TROLOLO_Trainer(model, experiment_name="MNIST")
+trainer = TROLOLO_Trainer(trololo, experiment_name="MNIST")
 
 # Load data
-transform = torchvision.transforms.ToTensor()
+transform = torchvision.transforms.Compose(
+    [torchvision.transforms.ToTensor(),
+     torchvision.transforms.v2.ToDtype(trainer.input_dtype)]
+)
 train_data = torchvision.datasets.MNIST(root="data/MNIST", train=True, download=True, transform=transform)
 val_data = torchvision.datasets.MNIST(root="data/MNIST", train=False, transform=transform)
 
@@ -163,16 +173,16 @@ trainer.training_loop(
     train_data=train_data,
     val_data=val_data,
     lr=2e-3,
-    lr_mid=2e-4,
-    lr_min=5e-6,
+    lr_mid=1e-4,
+    lr_min=1e-6,
     n_epochs=300,
-    batch_size=64,
+    batch_size=64,    
 )
 ```
 
-For the full setup with augmentation that reaches 99.64%, see `MNIST.py`.
+For the full setup with augmentation that reaches 99.652%, see `MNIST.py`.
 
-For a more complete example with all optimizations on a harder dataset, see `TROLOLO_HAHAHAHA.py` (EuroSAT, 97%+ accuracy with 96K parameters).
+For a more complete example with all optimizations on a harder dataset, see `TROLOLO_HAHAHAHA.py` (EuroSAT, 97% accuracy with 96K parameters).
 
 ### Beyond Image Classification
 
@@ -209,9 +219,13 @@ The comparison uses published numbers from the EuroSAT paper. Our augmentation p
 
 | Model | Parameters | Error Rate | Training Time | Notes |
 |-------|------------|------------|---------------|-------|
-| TROLOLO | ~50K | 0.36% | ~2 hours | Full augmentation |
+| TROLOLO | ~110K      | 0.348%     | ~2 hours | Full augmentation |
 
-This matches CNNs with 2.5M+ parameters. Lower error rates exist but seem to require ensembles or specialized training procedures.
+This matches or exceeds standard Vision Transformers with 85M+ parameters, and is competitive with well-tuned single-model CNNs. Lower error rates for single models exist (best ~0.17% with a branching CNN+capsule architecture), but typically require architectural innovations such as convolutional tokenization — the best pure transformer result we found is ~0.35% with a hyperparameter-optimized ViT.
+
+![Training curves](https://github.com/user-attachments/assets/6857c5de-7897-4f44-a7e0-dd6ebd73b921)
+
+
 
 ### Other Datasets (Preliminary)
 
@@ -381,14 +395,16 @@ DALI improves dataloading performance by providing hardware image decoding and r
 - `TROLOLO_Trainer.py`: Training loops and utilities
 - `TROLOLOLR_Scheduler.py`: Learning rate scheduler
 - `PYTHON_IS_DUMB.py`: Compilation flags and options
-- `MNIST.py`, `CIFAR10.py`, `PCAM.py`, `Imagenet.py` , `EuroSAT.py`: Dataset-specific examples
+- `MNIST.py`, `MNIST_tiny.py`, `CIFAR10.py`, `PCAM.py`, `Imagenet.py` , `EuroSAT.py`: Dataset-specific examples
 - `TROLOLO_HAHAHAHA.py`: Full-featured EuroSAT example (PyTorch and DALI variants) , EuroSAT.py is over 4x larger but only does 0.3% better. 
 
 ## Roadmap / Future Work
 
 No timeline, but planned:
-- [ ] Configurable dtypes and devices
-- [ ] Variable sequence length support
+- [ ] Cpu inference
+- [ ] Variable sequence length
+- [ ] Causal masked attention
+- [ ] Sequence to sequence models
 - [ ] Optimized CUDA kernels (PyTorch overhead dominates for small models)
 - [ ] Quantized inference implementation
 - [ ] Improved quantization schemes like multi level block quantization

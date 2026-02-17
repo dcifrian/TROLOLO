@@ -37,7 +37,7 @@ def TROLOLO_Hahahahaha(quantize=True):
                       num_classes=10,
                       mlp_rank=0.05,
                       qkv_rank=0.06,
-                      attnproj_rank=0.05,
+                      attnproj_rank=0.04,
                       sequence_pyramid=[(2, 4)],
                       attn_rank_pyramid=[(0, 32),(1, 16), (2, 16)],
                       rank_pyramid_begin=2,
@@ -49,14 +49,14 @@ def TROLOLO_Hahahahaha(quantize=True):
                       activation=nn.Hardswish
                       )
     trainer = TROLOLO_Trainer(trololo=trololo,experiment_name="Eurosat_96K")
-    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
+    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor(),v2.ToDtype(trainer.input_dtype)])
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     generator = torch.Generator().manual_seed(42)  # To always produce the same split.
     _, val_data = random_split(dataset=dataset, lengths = [0.9, 0.1], generator=generator)
     generator = torch.Generator().manual_seed(42)  # To always produce the same split.
     transform = torchvision.transforms.Compose([
         torchvision.transforms.ToTensor(),
-        v2.ToDtype(torch.uint8, scale=True),
+        v2.ToDtype(trainer.input_dtype),
         v2.RandomHorizontalFlip(),
         v2.RandomChoice([
             v2.RandomAdjustSharpness(sharpness_factor=0.9, p=0.05),
@@ -73,16 +73,15 @@ def TROLOLO_Hahahahaha(quantize=True):
              v2.RandomAffine(degrees=0, translate=(0.25, 0.25), interpolation=InterpolationMode.NEAREST),
             ]), p=0.75),
             v2.RandomApply(torch.nn.ModuleList([
-             v2.RandomAffine(degrees=0, scale=(0.95, 1.05), interpolation=InterpolationMode.BILINEAR),
+             v2.RandomAffine(degrees=0, scale=(1.0, 1.05), interpolation=InterpolationMode.BILINEAR),
             ]), p=0.25),
-            #v2.RandomPerspective(distortion_scale=0.04, p=0.75),
+            v2.RandomPerspective(distortion_scale=0.04, p=0.75),
             v2.ElasticTransform(alpha=50, sigma=5),
         ]),
         v2.CenterCrop(size=(64, 64)),
         v2.RandomErasing(p=0.8, scale=(0.0, 0.05), value='random'),
         v2.RandomErasing(p=0.5, scale=(0.0, 0.05), value='random'),
-        v2.ToDtype(torch.float16, scale=True),
-        #torchvision.transforms.v2.GaussianNoise(sigma=0.002),
+        torchvision.transforms.v2.GaussianNoise(sigma=0.002),
     ])
     dataset = torchvision.datasets.ImageFolder("data/eurosat", transform=transform)
     train_data, _ = random_split(dataset=dataset, lengths=[0.9, 0.1], generator=generator)
@@ -92,7 +91,7 @@ def TROLOLO_Hahahahaha(quantize=True):
     #infinitesat = torchvision.datasets.ImageFolder("data/infinitesat/images", transform=transform)
     #trainer.pretraining_loop(train_data=infinitesat, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=2, batch_size=batch_size)
     #trainer.pretraining_loop(train_data=train_data, lr=2e-3, lr_mid=4.0e-4, lr_min=1e-5, n_epochs=300, batch_size=batch_size)
-    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3*lr_scaling,lr_mid=2.0e-4*lr_scaling,lr_min=5e-6*lr_scaling,n_epochs=2000,batch_size=batch_size,transfer=0,transforms=transform_gpu)
+    trainer.training_loop(train_data=train_data,val_data=val_data,lr=2e-3*lr_scaling,lr_mid=2.0e-4*lr_scaling,lr_min=1e-6*lr_scaling,n_epochs=2000,batch_size=batch_size,transfer=0,transforms=transform_gpu)
 
 
 

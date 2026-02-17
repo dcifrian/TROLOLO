@@ -50,7 +50,13 @@ def PCAM(quantize=True):
     trainer = TROLOLO_Trainer(trololo,experiment_name="PCAM")
     transform = torchvision.transforms.Compose([
         torchvision.transforms.ToTensor(),
-        v2.ToDtype(torch.uint8, scale=True),
+        v2.ToDtype(trainer.input_dtype),
+        v2.CenterCrop(size=(32, 32)),
+    ])
+    val_data = torchvision.datasets.PCAM(root="data/PCAM", download=True, split="val", transform=transform)
+    transform = torchvision.transforms.Compose([
+        torchvision.transforms.ToTensor(),
+        v2.ToDtype(trainer.input_dtype),
         v2.CenterCrop(size=(32, 32)),
         v2.RandomHorizontalFlip(),
         v2.RandomChoice([
@@ -60,7 +66,6 @@ def PCAM(quantize=True):
         v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.02),
         v2.AugMix(severity=1),
     ])
-    val_data = torchvision.datasets.PCAM(root="data/PCAM", download=True, split="val", transform=transform)
     transform_gpu = torchvision.transforms.Compose([
          v2.Lambda(lambda x: nn.functional.pad(x, (31, 31, 31, 31), mode='circular')),
          v2.RandomRotation(degrees=180, expand=False),
@@ -73,11 +78,9 @@ def PCAM(quantize=True):
          v2.CenterCrop(size=(32,32)),
          v2.RandomErasing(p=0.8, scale=(0.0, 0.05), value='random'),
          v2.RandomErasing(p=0.5, scale=(0.0, 0.05), value='random'),
-         v2.ToDtype(torch.float16, scale=True),
          #torchvision.transforms.v2.GaussianNoise(sigma=0.002),
          ],
     )
-    from torchvision.utils import make_grid
     train_data = torchvision.datasets.PCAM(root="data/PCAM", download=True, split="train", transform=transform)
     batch_size=256
     lr_scaling = TROLOLOLR_Scheduler.lr_scale(batch_size=(batch_size, 64), dims=[(trololo.embed_dim, 192), (trololo.mlp_dim, 512)], num_layers=(trololo.num_layers, 6))

@@ -48,11 +48,11 @@ def CIFAR10(quantize=True):
                       )
 
     trainer = TROLOLO_Trainer(trololo, experiment_name="CIFAR10")
-    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor()])
+    transform = torchvision.transforms.Compose([torchvision.transforms.ToTensor(),v2.ToDtype(trainer.input_dtype)])
     val_data = torchvision.datasets.CIFAR10(root="data/CIFAR10", download=True, train=False, transform=transform)
     transform = torchvision.transforms.Compose(
         [torchvision.transforms.ToTensor(),
-         v2.ToDtype(torch.uint8, scale=True),
+         v2.ToDtype(trainer.input_dtype),
          v2.RandomVerticalFlip(),
          v2.RandomHorizontalFlip(),
          v2.RandomChoice([
@@ -62,13 +62,12 @@ def CIFAR10(quantize=True):
          v2.ColorJitter(brightness=0.12, contrast=0.18, saturation=0.15, hue=0.5),
          v2.RandomResizedCrop(size=(32,32), scale=(0.5,1.0),antialias=False),
          v2.ElasticTransform(alpha=50.0, fill=127),
-         v2.ToDtype(torch.float16, scale=True),
          ],
     )
     pretrain_data = torchvision.datasets.CIFAR10(root="data/CIFAR10", download=True, train=True, transform=transform)
     transform = torchvision.transforms.Compose(
         [torchvision.transforms.ToTensor(),
-         #v2.ToDtype(torch.uint8, scale=True),
+         v2.ToDtype(trainer.input_dtype),
          v2.RandomHorizontalFlip(),
          v2.RandomChoice([
              v2.RandomAdjustSharpness(sharpness_factor=0.8, p=0.15),
@@ -91,7 +90,6 @@ def CIFAR10(quantize=True):
          v2.CenterCrop(size=(32, 32)),
          v2.RandomErasing(p=0.8, scale=(0.0, 0.04), value='random'),
          v2.RandomErasing(p=0.5, scale=(0.0, 0.04), value='random'),
-         #v2.ToDtype(torch.float16, scale=True),
          torchvision.transforms.v2.GaussianNoise(sigma=0.002),
          ],
     )

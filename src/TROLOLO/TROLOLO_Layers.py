@@ -53,15 +53,15 @@ class PosEmbedding2D(nn.Module):
         x_size=int(x_size)
         y_size=int(y_size)
         seq_length=int(seq_length)
-        pos_embedding_x = torch.zeros(seq_length, device="cuda")
-        pos_embedding_y = torch.zeros(seq_length, device="cuda")
-        pos_embedding_x[n_class_tokens:] = (torch.arange(start=1,end=x_size+1, device="cuda").repeat(y_size, 1).flatten() / (x_size + 1))[:seq_length-n_class_tokens] # 0 to 1
-        pos_embedding_y[n_class_tokens:] = (torch.arange(start=1,end=y_size+1, device="cuda").repeat(x_size, 1).T.flatten() / (x_size + 1))[:seq_length-n_class_tokens]  # 0 to 1
-        self.embedding_scale = torch.nn.Parameter(torch.ones(1,device="cuda"))
+        pos_embedding_x = torch.zeros(seq_length)
+        pos_embedding_y = torch.zeros(seq_length)
+        pos_embedding_x[n_class_tokens:] = (torch.arange(start=1,end=x_size+1).repeat(y_size, 1).flatten() / (x_size + 1))[:seq_length-n_class_tokens] # 0 to 1
+        pos_embedding_y[n_class_tokens:] = (torch.arange(start=1,end=y_size+1).repeat(x_size, 1).T.flatten() / (x_size + 1))[:seq_length-n_class_tokens]  # 0 to 1
+        self.embedding_scale = torch.nn.Parameter(torch.ones(1))
         pos_embedding = torch.stack([pos_embedding_x, pos_embedding_y], dim=1)  # [256, 2]
         #self.pos_embedding = self.pos_embedding[n_class_tokens:,:]
-        class_embedding = -torch.arange(start=1,end=n_class_tokens+1, device="cuda") / n_class_tokens
-        class_embedding = torch.stack([class_embedding,-torch.arange(start=n_class_tokens+1,end=1,step=-1, device="cuda") / (n_class_tokens + 1)],dim=1)
+        class_embedding = -torch.arange(start=1,end=n_class_tokens+1) / n_class_tokens
+        class_embedding = torch.stack([class_embedding,-torch.arange(start=n_class_tokens+1,end=1,step=-1) / (n_class_tokens + 1)],dim=1)
         pos_embedding[:n_class_tokens,:]=class_embedding
         self.register_buffer("pos_embedding",pos_embedding, persistent=False)
         # Now each token is [190 features + x_coord + y_coord] = 192 dim
@@ -79,10 +79,10 @@ class PosEmbedding1D(nn.Module):
     def __init__(self, seq_length, n_class_tokens, **kwargs):
         super().__init__()
         self.reserved_dims = 1
-        pos_embedding = torch.zeros(seq_length, device="cuda")
-        pos_embedding[n_class_tokens:] = (torch.arange(start=1,end=seq_length+1-n_class_tokens, device="cuda") / (seq_length+1-n_class_tokens))[:seq_length-n_class_tokens] # 0 to 1
-        self.embedding_scale = torch.nn.Parameter(torch.ones(1,device="cuda"))
-        class_embedding = -torch.arange(start=1,end=n_class_tokens+1, device="cuda") / n_class_tokens
+        pos_embedding = torch.zeros(seq_length)
+        pos_embedding[n_class_tokens:] = (torch.arange(start=1,end=seq_length+1-n_class_tokens) / (seq_length+1-n_class_tokens))[:seq_length-n_class_tokens] # 0 to 1
+        self.embedding_scale = torch.nn.Parameter(torch.ones(1))
+        class_embedding = -torch.arange(start=1,end=n_class_tokens+1) / n_class_tokens
         pos_embedding[:n_class_tokens]=class_embedding
         pos_embedding=pos_embedding.unsqueeze(dim=1)
         self.register_buffer("pos_embedding",pos_embedding, persistent=False)
@@ -199,8 +199,8 @@ class EncoderBlockSVD(nn.Module):
             direction = 1 - 2 * round(height_frac)
             self.target_w = int(target_side + direction * (height_frac > 1e-10))
             self.target_h = self.out_dim // self.target_w
-        self.skip_scale =torch.ones(max(1,learnable_skips),device="cuda")
-        self.skip_scale_attn = torch.ones(1, device="cuda")
+        self.skip_scale =torch.ones(max(1,learnable_skips))
+        self.skip_scale_attn = torch.ones(1)
         if learnable_skips > 0:
             self.skip_scale =  nn.Parameter(self.skip_scale, requires_grad=True)
             self.skip_scale_attn = nn.Parameter(self.skip_scale_attn, requires_grad=True)
@@ -494,12 +494,11 @@ class REncoderSVD(nn.Module):
         super().__init__()
         # Note that batch_size is on the first dim because
         # we have batch_first=True in nn.MultiAttention() by default
-        #self.pos_embedding = nn.Parameter(torch.empty(1, seq_length, embed_dim).normal_(std=0.02))  # from BERT
-        #self.pos_embedding = build_rotary_pos_embed(feat_shape=[16,16],dim=embed_dim,max_res=256, device="cuda")
+
         img_size=int(math.sqrt(seq_length-n_class_tokens))
         self.n_class_tokens= n_class_tokens
         self.num_layers=num_layers
-        self.layerid_scale = torch.nn.Parameter(torch.ones(1, device="cuda") * 0.2)
+        self.layerid_scale = torch.nn.Parameter(torch.ones(1) * 0.2)
         self.pos_embedding = pos_embedding(seq_length=seq_length, n_class_tokens=n_class_tokens, x_size=img_size, y_size=img_size)
         self.dropout = nn.Dropout(dropout)
         self.rank_pyramid_begin = rank_pyramid_begin
